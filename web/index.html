@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hajsaver</title>
+<meta name="description" content="Blåhaj swims through the Abyssal Garden: a screensaver, in your browser (WebGPU) and as a native Windows .scr.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+  :root { --ink: #dff4ff; --dim: #8fb6c9; --panel: rgba(4, 22, 34, .55); --line: rgba(160, 220, 255, .18); --accent: #7fd0ff; }
+  html, body { margin: 0; height: 100%; background: #031019; color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .ui { position: fixed; left: 16px; right: 16px; bottom: 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; justify-content: space-between; transition: opacity .8s; pointer-events: none; }
+  .ui > * { pointer-events: auto; }
+  body.idle .ui { opacity: 0; }
+  body.idle { cursor: none; }
+  .card { background: var(--panel); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; max-width: 520px; }
+  h1 { margin: 0 0 2px; font-size: 18px; letter-spacing: .02em; }
+  p { margin: 0; color: var(--dim); }
+  a { color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, .btn { appearance: none; border: 1px solid var(--line); background: rgba(127, 208, 255, .1); color: var(--ink); border-radius: 8px; padding: 7px 11px; font: inherit; cursor: pointer; text-decoration: none; }
+  button:hover, .btn:hover { background: rgba(127, 208, 255, .2); }
+  button.on { background: rgba(127, 208, 255, .32); border-color: var(--accent); }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; font-size: 16px; color: var(--dim); pointer-events: none; text-align: center; padding: 16px; }
+  #status:empty { display: none; }
+  small { color: var(--dim); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">Loading…</div>
+<div class="ui">
+  <div class="card">
+    <h1>Hajsaver</h1>
+    <p>Blåhaj swims through the Abyssal Garden. Double-click for full screen.</p>
+    <p><small>Model: <a href="https://sketchfab.com/3d-models/blahaj-ce981de49111488c81ea646067abe1ec">“Blahaj” by Kaine_G</a> (CC BY 4.0). World: <a href="https://github.com/Coral-coder/abyssal-garden">Abyssal Garden</a> by Maksymilian Dendura (MIT).</small></p>
+  </div>
+  <div class="card row">
+    <span>Detail</span>
+    <button data-q="0">High</button><button data-q="1">Medium</button><button data-q="2">Low</button>
+    <a class="btn" href="Hajsaver.scr" download>Windows screensaver (.scr)</a>
+  </div>
+</div>
+<script type="module">
+  const status = document.getElementById('status');
+  const qs = new URLSearchParams(location.search);
+  const mobile = matchMedia('(pointer:coarse)').matches;
+  let level = qs.has('q') ? +qs.get('q') : (() => { try { return +(localStorage.hajsaverQ ?? (mobile ? 2 : 0)); } catch { return mobile ? 2 : 0; } })();
+  if (!(level >= 0 && level <= 2)) level = 0;
+  for (const b of document.querySelectorAll('[data-q]')) {
+    if (+b.dataset.q === level) b.className = 'on';
+    b.onclick = () => { try { localStorage.hajsaverQ = b.dataset.q; } catch {} location.search = '?q=' + b.dataset.q; };
+  }
+  // the controls fade away when the mouse rests
+  let idle; const wake = () => { document.body.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => document.body.classList.add('idle'), 3500); };
+  for (const e of ['mousemove', 'pointerdown', 'keydown', 'touchstart']) addEventListener(e, wake, { passive: true });
+  wake();
+  const full = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.().catch(() => 0);
+  document.getElementById('c').addEventListener('dblclick', full);
+  addEventListener('keydown', (e) => { if (e.code === 'KeyF') full(); });
+  if (!navigator.gpu) {
+    status.textContent = 'This screensaver needs WebGPU. Try a current Chrome or Edge, or download the Windows screensaver below.';
+  } else {
+    try {
+      const m = await import('./pkg/hajsaver.js');
+      await m.default();
+      await m.run('c', level);
+    } catch (e) {
+      console.error(e);
+      status.textContent = 'Could not start: ' + (e?.message ?? e);
+    }
+  }
+</script>
+</body>
+</html>

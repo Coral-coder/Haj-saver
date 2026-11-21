@@ -1,0 +1,49 @@
+# Builds the Windows screensaver (Hajsaver.scr) and the WebAssembly page, and publishes both to GitHub Pages from
+# the default branch. Other branches and pull requests get the build and a downloadable Hajsaver.scr artifact.
+# One-time setup: Settings -> Pages -> Source: GitHub Actions.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,x86_64-pc-windows-gnu
+      - name: MinGW cross compiler (for the .scr)
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (same version as in Cargo.lock)
+        run: cargo install wasm-bindgen-cli --locked --version "$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)"
+      - name: Build the page and the screensaver
+        run: ./tools/build-web.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hajsaver.scr
+          path: web/Hajsaver.scr
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
