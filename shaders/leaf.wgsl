@@ -58,6 +58,11 @@ fn pal(h: f32) -> vec3f {
   p += N2 * ruf;
   let sw = sway(i.a.xz, hA + (p.y - i.a.y), t);
   p.x += sw.x; p.z += sw.y;
+  // Hajsaver: leaves bend out of the shark's way (his body as a capsule along shf, radius ~shk.w / 3)
+  let sa = g.shk.xyz - g.shf.xyz * g.shf.w; let sba = g.shf.xyz * (2. * g.shf.w);
+  let sh = clamp(dot(p - sa, sba) / max(dot(sba, sba), 1e-4), 0., 1.);
+  let sdv = p - (sa + sba * sh); let sdl = max(length(sdv), 1e-3);
+  p += sdv / sdl * max(g.shk.w * .45 - sdl, 0.) * v;
   o.cp = g.vp * vec4f(p, 1.); o.wp = p; o.n = normalize(N2 + S * u * .55 - T0 * cos(v * 10. + s2 * 30. + t * .6) * u * .7 * nearK); o.uv = vec2f(u, v);
   o.col = col; o.pr = pr; o.sd = vec2f(s1, s2); o.spc = spc;
   return o;

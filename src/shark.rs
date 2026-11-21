@@ -34,6 +34,42 @@ fn decode(jpg: &[u8]) -> (u32, u32, Vec<u8>) {
 /// the fin regions of the mesh (mesh space: snout -x, dorsal +y, pectoral fins +-z)
 fn is_fin(x: f32, y: f32, z: f32) -> bool { (x > -1.6 && x < 0.7 && y > 0.85) || (x > 2.1 && y > 0.4) || (z.abs() > 0.75 && y < 0.8 && x > -1.7 && x < 1.0) }
 
+/// The teeth are flaps hanging straight down from the mouth. Keep each one's wide end (high u) where it meets the
+/// body and swing its tip toward the other row, so the two rows point at each other like the plush's.
+fn swing_teeth(p: &mut [f32], uv: &[f32], ix: &[f32]) {
+    // group the vertices into teeth (each tooth is two triangles sharing an edge)
+    let n = p.len() / 3; let mut grp: Vec<usize> = (0..n).collect();
+    fn root(g: &mut Vec<usize>, mut i: usize) -> usize { while g[i] != i { g[i] = g[g[i]]; i = g[i]; } i }
+    for t in ix.chunks(3) { let a = root(&mut grp, t[0] as usize); for &k in &t[1..] { let b = root(&mut grp, k as usize); grp[b] = a; } }
+    let mut teeth: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for i in 0..n { let r = root(&mut grp, i); teeth.entry(r).or_default().push(i); }
+    let lower = |i: usize| uv[i * 2] > 0.0555;
+    let v = |p: &[f32], i: usize| [p[i * 3] as f64, p[i * 3 + 1] as f64, p[i * 3 + 2] as f64];
+    let ttl: Vec<Vec<usize>> = teeth.into_values().collect();
+    // base edge: the two vertices with the highest u; tip: the rest
+    let split = |t: &Vec<usize>| { let mut s = t.clone(); s.sort_by(|&a, &b| uv[b * 2].partial_cmp(&uv[a * 2]).unwrap()); (s[..2].to_vec(), s[2..].to_vec()) };
+    let mid = |p: &[f32], s: &[usize]| { let mut m = [0.0; 3]; for &i in s { let q = v(p, i); for k in 0..3 { m[k] += q[k] / s.len() as f64; } } m };
+    let orig = p.to_vec();
+    for t in &ttl {
+        let (base, tip) = split(t); let lw = lower(t[0]);
+        let a = v(&orig, base[0]); let b = v(&orig, base[1]); let bm = mid(&orig, &base);
+        let axis = norm(sub(b, a));
+        let rot = |q: V3, ang: f64| { // rotate q about the base edge
+            let r = sub(q, a); let (c, s) = (ang.cos(), ang.sin()); let d = dot(axis, r);
+            add(a, add(add(mul(r, c), mul(cross(axis, r), s)), mul(axis, d * (1.0 - c))))
+        };
+        // the rows are two arcs around the mouth: the top row on the outside, the bottom row inside it. Top-row
+        // tips lean in toward the mouth's middle, bottom-row tips lean out toward the top row.
+        let centre = [-2.45, bm[1], 0.0];
+        let inward = norm([centre[0] - bm[0], 0.0, centre[2] - bm[2]]);
+        let want = if lw { mul(inward, -1.0) } else { inward };
+        let tm = mid(&orig, &tip);
+        let gain = |ang: f64| dot(sub(rot(tm, ang), tm), want);
+        let sw = if lw { 0.5 } else { 0.4 }; let ang = if gain(sw) > gain(-sw) { sw } else { -sw };
+        for &i in &tip { let q = rot(v(&orig, i), ang); for k in 0..3 { p[i * 3 + k] = q[k] as f32; } }
+    }
+}
+
 pub fn load() -> SharkMesh {
     let jl = u32::from_le_bytes(GLB[12..16].try_into().unwrap()) as usize;
     let json: serde_json::Value = serde_json::from_slice(&GLB[20..20 + jl]).expect("glb json");
@@ -45,6 +81,8 @@ pub fn load() -> SharkMesh {
         let (p, _) = accessor(&json, bin, ga("POSITION")); let (n, _) = accessor(&json, bin, ga("NORMAL")); let (uv, _) = accessor(&json, bin, ga("TEXCOORD_0"));
         let (ix, _) = accessor(&json, bin, pr["indices"].as_u64().unwrap() as usize);
         // triangle soup: 9 floats per corner
+        let mut p = p;
+        if part == 1.0 { swing_teeth(&mut p, &uv, &ix); }
         let mut tri: Vec<[f32; 9]> = ix.iter().map(|&i| { let i = i as usize; [p[i * 3], p[i * 3 + 1], p[i * 3 + 2], n[i * 3], n[i * 3 + 1], n[i * 3 + 2], uv[i * 2], uv[i * 2 + 1], part] }).collect();
         if part == 0.0 {
             for _ in 0..2 {
@@ -210,11 +248,19 @@ impl Shark {
         // move, then make sure he never ends up inside the rock
         let m = mul(self.fwd, self.speed * dt);
         let mut v = mul(self.fwd, self.speed);
-        field.collide(&mut self.pos, m, &mut v, 0.75);
-        for end in [0.45, -0.45] { // nose and tail
-            let mut e = add(self.pos, mul(self.fwd, LENGTH * end)); let e0 = e; let mut vv = v;
-            field.collide(&mut e, [0.0; 3], &mut vv, 0.35);
-            self.pos = add(self.pos, sub(e, e0));
+        field.collide(&mut self.pos, m, &mut v, 0.55);
+        // the whole body: a chain of spheres from nose to tail (and out to the pectoral fins), each pushed out of
+        // whatever it touches; the push moves the shark, and he loses the speed that went into the obstacle
+        for _ in 0..3 {
+            let mut push = [0.0; 3]; let mut hit = false;
+            for (k, w) in self.body_spheres() {
+                let d = field.dist(k[0], k[1], k[2]) + w;
+                if d > 0.0 { let g = field.grad(k[0], k[1], k[2]); push = add(push, mul(g, -d)); hit = true; }
+            }
+            if !hit { break; }
+            self.pos = add(self.pos, mul(push, 0.6));
+            let into = -dot(norm(push), self.fwd);
+            if into > 0.0 { self.speed *= 1.0 - 0.5 * into; }
         }
 
         // animation: tail beat follows the speed, fins steer and balance
@@ -234,6 +280,11 @@ impl Shark {
         SharkPose { pos: self.pos, fwd: self.fwd, up: self.up, scale: SCALE,
             a: [self.phase, amp, clamp(-self.yaw_rate * 1.1, -0.9, 0.9), clamp(self.pitch_rate * 0.8, -0.5, 0.5)],
             b: [self.flap_l, self.flap_r, self.dorsal, -tail * 1.6] }
+    }
+    /// collision spheres (centre, radius) along his body and at the pectoral fins
+    pub fn body_spheres(&self) -> [(V3, f64); 7] {
+        let f = self.fwd; let l = norm(cross(self.up, f)); let p = self.pos; let at = |a: f64, s: f64| add(add(p, mul(f, LENGTH * a)), mul(l, s));
+        [(at(0.40, 0.0), 0.28), (at(0.22, 0.0), 0.42), (at(0.0, 0.0), 0.48), (at(-0.2, 0.0), 0.38), (at(-0.4, 0.0), 0.25), (at(0.08, 0.62), 0.16), (at(0.08, -0.62), 0.16)]
     }
     pub fn vel(&self) -> V3 { mul(self.fwd, self.speed) }
 }

@@ -42,7 +42,7 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         while t < secs {
             let cam = app.advance(1.0 / 30.0); t += 1.0 / 30.0;
             let s = &app.shark; let f = app.field();
-            let d = f.dist(s.pos[0], s.pos[1], s.pos[2]); worst = worst.max(d); if d > -0.5 { in_rock += 1.0 / 30.0; }
+            let d = s.body_spheres().iter().map(|(k, r)| f.dist(k[0], k[1], k[2]) + r).fold(-9.0f64, f64::max); worst = worst.max(d); if d > 0.05 { in_rock += 1.0 / 30.0; }
             if f.dist(cam.pos[0], cam.pos[1], cam.pos[2]) > -0.2 { cam_rock += 1.0 / 30.0; }
             if !f.clear_line(cam.pos, s.pos, 0.0) { hidden += 1.0 / 30.0; }
             let dd = hajsaver::shark::v3::len(hajsaver::shark::v3::sub(s.pos, cam.pos)); if dd > 25.0 { far += 1.0 / 30.0; }
@@ -53,7 +53,7 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
             shots.get_mut(&name).unwrap().1 += 1.0 / 30.0;
             if (t * 30.0).round() as i64 % (30 * 60) == 0 { eprintln!("t={:.0} shark=({:.1},{:.1},{:.1}) v={:.2}", t, s.pos[0], s.pos[1], s.pos[2], s.speed); }
         }
-        eprintln!("worst shark rock distance {worst:.2} m; near/in rock {in_rock:.1} s; slow {slow:.1} s; camera in rock {cam_rock:.1} s; shark hidden {hidden:.1} s; far {far:.1} s");
+        eprintln!("worst body penetration {worst:.2} m; touching (>5 cm) for {in_rock:.1} s; slow {slow:.1} s; camera in rock {cam_rock:.1} s; shark hidden {hidden:.1} s; far {far:.1} s");
         eprintln!("shark range x {:.0}..{:.0} y {:.0}..{:.0} z {:.0}..{:.0}", minp[0], maxp[0], minp[1], maxp[1], minp[2], maxp[2]);
         for (k, v) in shots { eprintln!("  {k:8} {:4} shots, {:6.0} s, avg {:.1} s", v.0, v.1, v.1 / v.0 as f64); }
         return;
@@ -71,7 +71,10 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
             // debug close-up of the head, slightly from below, to check the teeth
             let sk = app.shark.pose(); let f = sk.fwd; let u = sk.up;
             let head = [sk.pos[0] + f[0] * 0.95, sk.pos[1] + f[1] * 0.95 - 0.12, sk.pos[2] + f[2] * 0.95];
-            let p = [head[0] + f[0] * 1.3 - u[0] * 0.35, head[1] + f[1] * 1.3 - u[1] * 0.35, head[2] + f[2] * 1.3 - u[2] * 0.35];
+            // HAJ_MOUTH=front|side|level picks the angle
+            let l = [u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]];
+            let (a, b, c) = match std::env::var("HAJ_MOUTH").as_deref() { Ok("side") => (0.5, -0.15, 1.2), Ok("level") => (1.4, 0.0, 0.0), _ => (1.3, -0.35, 0.0) };
+            let p = [head[0] + f[0] * a + u[0] * b + l[0] * c, head[1] + f[1] * a + u[1] * b + l[1] * c, head[2] + f[2] * a + u[2] * b + l[2] * c];
             let d = [head[0] - p[0], head[1] - p[1], head[2] - p[2]];
             let cam = hajsaver::render::Cam { pos: p, yaw: d[0].atan2(-d[2]), pitch: d[1].atan2((d[0] * d[0] + d[2] * d[2]).sqrt()), tanh: 0.35, fade: 1.0 };
             app.r.render(&cam, app.time, &sk, &view);

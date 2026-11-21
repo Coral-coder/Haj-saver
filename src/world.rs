@@ -82,6 +82,8 @@ pub struct Field {
     caps: Vec<(V3, V3, f64)>,
     /// kelp columns (x, z, base y, top y), bucketed on a 4 m grid: soft obstacles that block the view
     kelp: Vec<[f32; 4]>, kgrid: Vec<Vec<u32>>,
+    /// loose solids (rocks, rock chunks, sponges, corals) as spheres x, y, z, r on the same 4 m grid
+    obst: Vec<[f32; 4]>, ogrid: Vec<Vec<u32>>,
 }
 const KG: usize = 100;
 const KW: f64 = 4.0;
@@ -123,7 +125,7 @@ impl Field {
             let l = ((gx * gx + gy * gy + gz * gz).sqrt() / (2.0 * 2.0 * VS as f32)).max(0.25);
             coarse[x + HX * (y + HY * z)] = (at(x, y, z) / l).clamp(-8.0, 8.0);
         } } }
-        Field { ci, cg, coarse, caps: vec![], kelp: vec![], kgrid: vec![vec![]; KG * KG] }
+        Field { ci, cg, coarse, caps: vec![], kelp: vec![], kgrid: vec![vec![]; KG * KG], obst: vec![], ogrid: vec![vec![]; KG * KG] }
     }
     fn cv(&self, x: i32, y: i32, z: i32) -> f64 {
         if x < 0 || y < 0 || z < 0 || x >= (CN * 4) as i32 || y >= NY as i32 || z >= (CN * 4) as i32 { return -127.0; }
@@ -157,7 +159,12 @@ impl Field {
         [g[0] / l, g[1] / l, g[2] / l]
     }
     /// best distance estimate: the exact fine field near the rock, the coarse one further out
-    pub fn set_obstacles(&mut self, caps: Vec<(V3, V3, f64)>, kelp: Vec<[f32; 4]>) {
+    pub fn set_obstacles(&mut self, caps: Vec<(V3, V3, f64)>, kelp: Vec<[f32; 4]>, obst: Vec<[f32; 4]>) {
+        for (i, o) in obst.iter().enumerate() {
+            let cx = (((o[0] as f64 + 200.0) / KW).max(0.0) as usize).min(KG - 1); let cz = (((o[2] as f64 + 200.0) / KW).max(0.0) as usize).min(KG - 1);
+            self.ogrid[cx + KG * cz].push(i as u32);
+        }
+        self.obst = obst;
         for (i, k) in kelp.iter().enumerate() {
             let cx = (((k[0] as f64 + 200.0) / KW) as usize).min(KG - 1); let cz = (((k[1] as f64 + 200.0) / KW) as usize).min(KG - 1);
             self.kgrid[cx + KG * cz].push(i as u32);
@@ -192,7 +199,21 @@ impl Field {
         for i in 1..n { let t = i as f64 / n as f64; if self.kelp_dist([a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t], r) < r { return false; } }
         true
     }
-    pub fn dist(&self, x: f64, y: f64, z: f64) -> f64 {
+    /// distance into the loose solids and kelp stems (> 0 inside), -3 when nothing is near
+    fn props_dist(&self, x: f64, y: f64, z: f64) -> f64 {
+        let mut d = -3.0f64;
+        let cx = ((x + 200.0) / KW).floor() as isize; let cz = ((z + 200.0) / KW).floor() as isize;
+        for gz in cz - 1..=cz + 1 { for gx in cx - 1..=cx + 1 {
+            if gx < 0 || gz < 0 || gx >= KG as isize || gz >= KG as isize { continue; }
+            let c = gx as usize + KG * gz as usize;
+            for &i in &self.ogrid[c] { let o = &self.obst[i as usize]; d = d.max(o[3] as f64 - hypot3(x - o[0] as f64, y - o[1] as f64, z - o[2] as f64)); }
+            // kelp stems: solid poles 0.45 m thick from the seabed to the column's top
+            for &i in &self.kgrid[c] { let k = &self.kelp[i as usize]; if y > k[2] as f64 - 1.0 && y < k[3] as f64 { d = d.max(0.45 - hypot2(x - k[0] as f64, z - k[1] as f64)); } }
+        } }
+        d
+    }
+    pub fn dist(&self, x: f64, y: f64, z: f64) -> f64 { self.dist_terrain(x, y, z).max(self.props_dist(x, y, z)) }
+    fn dist_terrain(&self, x: f64, y: f64, z: f64) -> f64 {
         let c = self.caps_dist(x, y, z);
         if c > -1.0 { return c.max(self.fine(x, y, z)); }
         let f = self.fine(x, y, z).max(y + 1.5).max(c);
@@ -275,7 +296,7 @@ pub struct World {
     pub solids: Vec<f32>, pub ranges: [(u32, u32); 12], pub bubbles: Vec<f32>, pub vol_d: Vec<u8>, pub gm: Vec<u8>,
     pub fish: [Vec<f32>; 3], pub mantas: Vec<f32>, pub snow: Vec<f32>, pub pose_y: Vec<f64>,
     /// kelp columns (x, z, base y, top y) and the set pieces' collision capsules, for the Field
-    pub kelp: Vec<[f32; 4]>, pub caps: Vec<(V3, V3, f64)>,
+    pub kelp: Vec<[f32; 4]>, pub caps: Vec<(V3, V3, f64)>, pub obst: Vec<[f32; 4]>,
 }
 
 const NC: usize = CELLS * CELLS;
@@ -654,11 +675,19 @@ pub fn make_world(d: &[f32], t: &Terrain, fly: &[V3], poses: &[[f64; 6]], lv: u3
         for c in 0..NC { let a = &l[c]; for i in (0..a.len()).step_by(12) { data.extend_from_slice(&a[i..i + 12]); lo[c] = lo[c].min(a[i + 1] - 3.0); hi[c] = hi[c].max(a[i + 1] + 3.0); } }
         Pack { buf: bytemuck::cast_slice(&data).to_vec(), n, start, lo, hi }
     };
+    // loose solids for the collision field: rocks, rock chunks (not pebbles), sponges, corals
+    let mut obst: Vec<[f32; 4]> = vec![];
+    for m in 0..4 { for o in g.solids[m].chunks(12) { obst.push([o[0], o[1], o[2], o[3] * 0.85]); } }
+    for c in &g.chunks[..6] { for cell in c { for o in cell.chunks(12) { if o[3] > 0.3 { obst.push([o[0], o[1], o[2], o[3] * 0.8]); } } } }
+    for (k, c) in g.props.iter().enumerate() { for cell in c { for o in cell.chunks(12) {
+        let (lift, r) = match k { 0..=2 => (0.55, 0.6), 3 | 4 => (0.25, 0.35), _ => (0.4, 0.45) };
+        obst.push([o[0], o[1] + o[3] * lift, o[2], o[3] * r]);
+    } } }
     let pose_y: Vec<f64> = poses.iter().map(|p| g.gy(p[0], p[2])).collect();
     World {
         glints: std::mem::take(&mut g.glints), chunks: g.chunks.iter().map(pack_c).collect(), props: g.props.iter().map(pack_c).collect(),
         big: pack(&g.big, 1, 1.0), big_f: pack(&g.big, 2, 1.5), small: pack(&g.small, 1, 1.0),
-        solids: sol, ranges, bubbles, vol_d, gm, fish, mantas, snow, pose_y, kelp: std::mem::take(&mut g.kelp), caps,
+        solids: sol, ranges, bubbles, vol_d, gm, fish, mantas, snow, pose_y, kelp: std::mem::take(&mut g.kelp), caps, obst,
     }
 }
 fn tangent(n: V3) -> (V3, V3) {

@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 
 pub const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const UBN: usize = 80; // floats in the scene uniform block (G in g.wgsl)
+const UBN: usize = 84; // floats in the scene uniform block (G in g.wgsl)
 
 /// preset viewpoints (position, look-at); the world generator dresses the scene around them
 pub const POSES: [[f64; 6]; 6] = [
@@ -325,7 +325,7 @@ impl Renderer {
         progress("Growing kelp", 0.45); crate::yield_now().await;
         let mut wd = make_world(&dens, &t, &fly_pts, &POSES, lv);
         drop(dens);
-        field.set_obstacles(std::mem::take(&mut wd.caps), std::mem::take(&mut wd.kelp));
+        field.set_obstacles(std::mem::take(&mut wd.caps), std::mem::take(&mut wd.kelp), std::mem::take(&mut wd.obst));
 
         progress("Building set pieces", 0.8); crate::yield_now().await;
         // mesh ids: 0-3 rocks, 4-6 sponges, 7-8 coral, 9 tube sponge, 10 whale fluke, 11 ship, 12 manta, 13 fish,
@@ -547,6 +547,7 @@ impl Renderer {
         }
         for i in 0..16 { m[60 + i] = ssm[i] as f32; self.ub_ss[i] = ssm[i] as f32; self.ub_ss[60 + i] = ssm[i] as f32; }
         m[76] = s(sk.pos[0]); m[77] = s(sk.pos[1]); m[78] = s(sk.pos[2]); m[79] = s(sk.scale * 3.4);
+        m[80] = s(sk.fwd[0]); m[81] = s(sk.fwd[1]); m[82] = s(sk.fwd[2]); m[83] = s(sk.scale * 7.37 * 0.42);
         self.ub_ss[32] = m[32]; self.ub_ss[33] = m[33]; self.ub_ss[34] = m[34]; self.ub_ss[35] = m[35];
         self.queue.write_buffer(&self.ubo, 0, bytemuck::cast_slice(&self.ub));
         self.queue.write_buffer(&self.ubo_ss, 0, bytemuck::cast_slice(&self.ub_ss));
