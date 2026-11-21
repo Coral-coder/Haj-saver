@@ -55,9 +55,9 @@ the detail level (High, Medium or Low).
 
 The page is at https://coral-coder.github.io/Haj-saver/.
 
-The workflow in `.github/workflows/build.yml` builds both. On the default branch it publishes the page to the
-`gh-pages` branch and updates the `latest` release with `Hajsaver.scr`. A tag like `v1.0.0` makes a versioned
-release. If the page doesn't appear, check **Settings → Pages**: *Deploy from a branch*, `gh-pages`, `/ (root)`.
+The workflow in `.github/workflows/build.yml` builds both. On `main` it deploys the page to GitHub Pages
+(source: GitHub Actions) and updates the `latest` release with `Hajsaver.scr`. A tag like `v1.0.0` makes a
+versioned release.
 
 ## Building
 

@@ -1,21 +1,20 @@
 # Builds the Windows screensaver (Hajsaver.scr) and the WebAssembly page.
-# On the default branch it also:
-#   - publishes the page to the gh-pages branch (GitHub Pages serves it; no Pages settings needed beyond
-#     "Deploy from a branch: gh-pages", which GitHub picks automatically for a new gh-pages branch)
+# On main (or whatever the default branch is):
+#   - deploys the page to GitHub Pages (Settings -> Pages -> Source: GitHub Actions)
 #   - updates the "latest" GitHub Release with Hajsaver.scr attached
-# Pushing a tag like v1.0.0 makes a versioned release too. Other branches and pull requests just build, and
-# upload Hajsaver.scr as a workflow artifact.
+# A tag like v1.0.0 makes a versioned release too. Other branches and pull requests only build, and upload
+# Hajsaver.scr as a workflow artifact.
 name: Build
 
 on:
   push:
-    branches: ['**', '!gh-pages']
+    branches: ['**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -36,31 +35,42 @@ jobs:
         with:
           name: Hajsaver.scr
           path: web/Hajsaver.scr
-
-      - name: Publish the page (gh-pages branch)
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./web
-          publish_branch: gh-pages
-          force_orphan: true
-          enable_jekyll: false
+          path: web
 
-      - name: Release "latest"
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  release:
+    needs: build
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Hajsaver.scr
+      - name: Publish Hajsaver.scr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git tag -f latest && git push -f origin latest
-          gh release view latest >/dev/null 2>&1 || gh release create latest --title "Hajsaver (latest build)" --notes "Built from ${GITHUB_SHA}. Download Hajsaver.scr, right-click it and choose Install."
-          gh release edit latest --notes "Built from ${GITHUB_SHA}. Download Hajsaver.scr, right-click it and choose Install." --prerelease=false
-          gh release upload latest web/Hajsaver.scr --clobber
-
-      - name: Release for a version tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Hajsaver $GITHUB_REF_NAME" --notes "Download Hajsaver.scr, right-click it and choose Install."
-          gh release upload "$GITHUB_REF_NAME" web/Hajsaver.scr --clobber
+          notes="Built from ${GITHUB_SHA}. Download Hajsaver.scr, right-click it and choose Install."
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tag="$GITHUB_REF_NAME"; title="Hajsaver $GITHUB_REF_NAME"
+          else tag=latest; title="Hajsaver (latest build)"; git tag -f latest && git push -f origin latest; fi
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$title" --notes "$notes"
+          gh release edit "$tag" --notes "$notes"
+          gh release upload "$tag" Hajsaver.scr --clobber
