@@ -129,7 +129,16 @@ pub struct Shark {
     flap_l: f64, flap_r: f64, fl_v: [f64; 2], dorsal: f64, dorsal_v: f64,
     /// a wanted detour target (pos) that overrides the route for a while
     detour: Option<(V3, f64)>, ring_a: f64, stuck: f64, escape: f64, flipped: f64,
+    /// 1 for the big shark; the little ones are 0.33..0.5
+    pub size: f64,
+    pub role: Role,
+    /// the little ones' wander target and when to pick a new one
+    goal: V3, goal_until: f64, rng: u32,
+    /// set by the App: where the camera is (for the follower) and where the others are (to keep apart)
+    pub cam: V3, pub cam_fwd: V3, pub others: Vec<V3>,
 }
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Role { Route, Roam, Follow }
 
 /// places worth a closer look: the ship, the whale fluke, the grotto, the kelp basin, the sponge canyon
 pub const SIGHTS: [[f64; 3]; 6] = [[55.0, -27.0, 6.0], [-5.0, -34.0, -4.0], [6.0, -34.0, 82.0], [4.0, -30.0, -86.0], [-62.0, -36.0, 2.0], [-40.0, -40.0, 44.0]];
@@ -142,7 +151,36 @@ impl Shark {
         for _ in 0..40 { if field.dist(pos[0], pos[1], pos[2]) < -1.2 { break; } pos[1] += 0.5; }
         let fwd = norm([q[0] - p[0], 0.0, q[2] - p[2]]);
         Shark { pos, fwd, up: [0.0, 1.0, 0.0], speed: 1.6, u: start, dir: 1.0, target_speed: 1.6, burst: 0.0, next_burst: 25.0, t: 0.0,
-            yaw_rate: 0.0, pitch_rate: 0.0, bank: 0.0, phase: 0.0, flap_l: 0.0, flap_r: 0.0, fl_v: [0.0; 2], dorsal: 0.0, dorsal_v: 0.0, detour: None, ring_a: 0.0, stuck: 0.0, escape: 0.0, flipped: -99.0 }
+            yaw_rate: 0.0, pitch_rate: 0.0, bank: 0.0, phase: 0.0, flap_l: 0.0, flap_r: 0.0, fl_v: [0.0; 2], dorsal: 0.0, dorsal_v: 0.0, detour: None, ring_a: 0.0, stuck: 0.0, escape: 0.0, flipped: -99.0,
+            size: 1.0, role: Role::Route, goal: pos, goal_until: 0.0, rng: 1, cam: pos, cam_fwd: [0.0, 0.0, 1.0], others: vec![] }
+    }
+    /// a little free-roaming shark (size 0.33..0.5) starting near p
+    pub fn little(path: &FlyPath, field: &Field, start: f64, size: f64, seed: u32) -> Shark {
+        let mut s = Shark::new(path, field, start);
+        s.size = size; s.role = Role::Roam; s.rng = seed.wrapping_mul(2654435761) | 1; s.speed = 1.2;
+        s.phase = seed as f64; s.pos[1] += 3.0 + (seed % 3) as f64;
+        for _ in 0..40 { if field.dist(s.pos[0], s.pos[1], s.pos[2]) < -1.0 { break; } s.pos[1] += 0.5; }
+        s.next_burst = 15.0 + (seed % 7) as f64 * 6.0;
+        s
+    }
+    fn rand(&mut self) -> f64 { let mut x = self.rng; x ^= x << 13; x ^= x >> 17; x ^= x << 5; self.rng = x; x as f64 / 4294967296.0 }
+    pub fn length(&self) -> f64 { LENGTH * self.size }
+    /// the little ones: somewhere new in open water every so often, often near one of the sights
+    fn roam_target(&mut self, field: &Field) -> V3 {
+        if self.t > self.goal_until || len(sub(self.goal, self.pos)) < 4.0 {
+            for _ in 0..30 {
+                let g = if self.rand() < 0.4 { let s = SIGHTS[(self.rand() * SIGHTS.len() as f64) as usize]; [s[0] + (self.rand() - 0.5) * 24.0, s[1] + self.rand() * 8.0, s[2] + (self.rand() - 0.5) * 24.0] }
+                    else { let a = self.rand() * TAU; let r = 20.0 + self.rand() * 30.0; [self.pos[0] + a.cos() * r, -36.0 + self.rand() * 22.0, self.pos[2] + a.sin() * r] };
+                if hypot2(g[0], g[2]) < 125.0 && field.dist(g[0], g[1], g[2]) < -3.0 && field.clear_line(self.pos, g, 0.5) { self.goal = g; break; }
+            }
+            self.goal_until = self.t + 20.0 + self.rand() * 30.0;
+        }
+        self.goal
+    }
+    /// the follower: keeps company a few metres in front of the camera, drifting from side to side
+    fn follow_target(&self) -> V3 {
+        let f = self.cam_fwd; let side = norm(cross([0.0, 1.0, 0.0], f));
+        add(add(self.cam, mul(f, 4.5)), add(mul(side, 2.2 * (self.t * 0.23).sin()), [0.0, -0.4 + 0.8 * (self.t * 0.17).sin(), 0.0]))
     }
     /// where the route wants him to be: a point ahead on the path, wandering a little around it
     fn route_target(&mut self, path: &FlyPath) -> V3 {
@@ -158,19 +196,25 @@ impl Shark {
         [a[0] + side[0] * off, a[1] + 2.0 + wob(self.t, 4.1) * 2.5, a[2] + side[2] * off]
     }
     pub fn step(&mut self, dt: f64, path: &FlyPath, field: &Field) {
+        let sz = self.size;
         let dt = dt.min(0.05);
         self.t += dt;
         // pace: an easy cruise that drifts, and now and then a burst of speed
         if self.t > self.next_burst { self.burst = 2.6; self.next_burst = self.t + 30.0 + 40.0 * (0.5 + 0.5 * wob(self.t * 3.0, 9.0)); }
         self.burst = (self.burst - dt).max(0.0);
-        self.target_speed = 1.5 + 0.5 * wob(self.t, 0.3) + if self.burst > 0.0 { 2.4 } else { 0.0 };
+        self.target_speed = (1.5 + 0.5 * wob(self.t, 0.3) + if self.burst > 0.0 { 2.4 } else { 0.0 }) * (0.55 + 0.45 * sz);
+        if self.role == Role::Follow {
+            // keep up with the camera: faster when far behind, easy when alongside
+            let d = len(sub(self.follow_target(), self.pos));
+            self.target_speed = clamp(0.6 + d * 0.6, 0.6, 6.0);
+        }
         self.speed += (self.target_speed - self.speed) * (1.0 - (-dt * if self.burst > 0.0 { 1.6 } else { 0.5 }).exp());
 
         // detours to the sights near the route
-        if self.detour.is_none() && self.escape <= 0.0 && wob(self.t * 2.0, 5.5) > 0.82 {
+        if self.role == Role::Route && self.detour.is_none() && self.escape <= 0.0 && wob(self.t * 2.0, 5.5) > 0.82 {
             for s in SIGHTS { let d = len(sub(s, self.pos)); if d < 30.0 && d > 8.0 { self.detour = Some((s, self.t + 16.0)); self.ring_a = (self.pos[2] - s[2]).atan2(self.pos[0] - s[0]); break; } }
         }
-        let mut target = self.route_target(path);
+        let mut target = match self.role { Role::Route => self.route_target(path), Role::Roam => self.roam_target(field), Role::Follow => self.follow_target() };
         if let Some((s, until)) = self.detour {
             // circle the sight a few metres out, on a ring that stays in open water
             self.ring_a += dt * 0.3;
@@ -187,6 +231,7 @@ impl Shark {
         if self.stuck > 2.5 {
             self.stuck = 0.0; self.detour = None; self.escape = 4.0;
             if self.t > self.flipped + 20.0 { self.dir = -self.dir; self.flipped = self.t; }
+            self.goal_until = 0.0;
         }
         if self.escape > 0.0 {
             self.escape -= dt;
@@ -200,9 +245,9 @@ impl Shark {
         let l = norm(cross(self.up, self.fwd));
         for (k, w) in [(1.5, 1.0), (3.5, 0.8), (6.0, 0.6), (9.0, 0.35)] {
             for side in [-1.0, 0.0, 1.0] {
-                let pr = add(add(self.pos, mul(self.fwd, k * (1.0 + self.speed * 0.25))), mul(l, side * 0.9));
+                let pr = add(add(self.pos, mul(self.fwd, k * (0.4 + 0.6 * sz) * (1.0 + self.speed * 0.25))), mul(l, side * 0.9 * sz));
                 let d = field.dist(pr[0], pr[1], pr[2]);
-                let m = 2.4;
+                let m = 2.4 * (0.5 + 0.5 * sz);
                 if d > -m {
                     let s = (d + m) / m; danger = danger.max(s * w);
                     let g = field.grad(pr[0], pr[1], pr[2]);
@@ -219,6 +264,11 @@ impl Shark {
                     }
                 });
             }
+        }
+        // keep a little apart from the other sharks
+        for o in &self.others {
+            let d = sub(self.pos, *o); let l = len(d);
+            if l < 3.5 && l > 1e-3 { push = add(push, mul(d, (3.5 - l) / (3.5 * l) * 1.5)); }
         }
         // stay off the surface and inside the world
         if self.pos[1] > -5.0 { push[1] -= (self.pos[1] + 5.0) * 0.4; }
@@ -248,7 +298,7 @@ impl Shark {
         // move, then make sure he never ends up inside the rock
         let m = mul(self.fwd, self.speed * dt);
         let mut v = mul(self.fwd, self.speed);
-        field.collide(&mut self.pos, m, &mut v, 0.55);
+        field.collide(&mut self.pos, m, &mut v, 0.55 * sz);
         // the whole body: a chain of spheres from nose to tail (and out to the pectoral fins), each pushed out of
         // whatever it touches; the push moves the shark, and he loses the speed that went into the obstacle
         for _ in 0..3 {
@@ -264,7 +314,7 @@ impl Shark {
         }
 
         // animation: tail beat follows the speed, fins steer and balance
-        let freq = 0.45 + 0.38 * self.speed;
+        let freq = (0.45 + 0.38 * self.speed) / sz.sqrt();
         self.phase += dt * TAU * freq;
         let fl_t = [0.11 * (self.phase * 0.5).sin() + self.yaw_rate * 0.35 + self.pitch_rate * 0.6, 0.11 * (self.phase * 0.5 + 0.4).sin() - self.yaw_rate * 0.35 + self.pitch_rate * 0.6];
         for (i, f) in [&mut self.flap_l, &mut self.flap_r].into_iter().enumerate() {
@@ -277,14 +327,14 @@ impl Shark {
     pub fn pose(&self) -> SharkPose {
         let amp = 0.34 + 0.08 * self.speed.min(4.0);
         let tail = (1.15 * 3.6 - self.phase).sin() * amp; // lateral tail position
-        SharkPose { pos: self.pos, fwd: self.fwd, up: self.up, scale: SCALE,
+        SharkPose { pos: self.pos, fwd: self.fwd, up: self.up, scale: SCALE * self.size,
             a: [self.phase, amp, clamp(-self.yaw_rate * 1.1, -0.9, 0.9), clamp(self.pitch_rate * 0.8, -0.5, 0.5)],
             b: [self.flap_l, self.flap_r, self.dorsal, -tail * 1.6] }
     }
     /// collision spheres (centre, radius) along his body and at the pectoral fins
     pub fn body_spheres(&self) -> [(V3, f64); 7] {
-        let f = self.fwd; let l = norm(cross(self.up, f)); let p = self.pos; let at = |a: f64, s: f64| add(add(p, mul(f, LENGTH * a)), mul(l, s));
-        [(at(0.40, 0.0), 0.28), (at(0.22, 0.0), 0.42), (at(0.0, 0.0), 0.48), (at(-0.2, 0.0), 0.38), (at(-0.4, 0.0), 0.25), (at(0.08, 0.62), 0.16), (at(0.08, -0.62), 0.16)]
+        let z = self.size; let f = self.fwd; let l = norm(cross(self.up, f)); let p = self.pos; let at = |a: f64, s: f64| add(add(p, mul(f, LENGTH * z * a)), mul(l, s * z));
+        [(at(0.40, 0.0), 0.28 * z), (at(0.22, 0.0), 0.42 * z), (at(0.0, 0.0), 0.48 * z), (at(-0.2, 0.0), 0.38 * z), (at(-0.4, 0.0), 0.25 * z), (at(0.08, 0.62), 0.16 * z), (at(0.08, -0.62), 0.16 * z)]
     }
     pub fn vel(&self) -> V3 { mul(self.fwd, self.speed) }
 }

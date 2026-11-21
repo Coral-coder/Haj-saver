@@ -84,6 +84,8 @@ pub struct Field {
     kelp: Vec<[f32; 4]>, kgrid: Vec<Vec<u32>>,
     /// loose solids (rocks, rock chunks, sponges, corals) as spheres x, y, z, r on the same 4 m grid
     obst: Vec<[f32; 4]>, ogrid: Vec<Vec<u32>>,
+    /// moving obstacles (the whale, the octopuses) as spheres, refreshed every step
+    dynamic: Vec<[f64; 4]>,
 }
 const KG: usize = 100;
 const KW: f64 = 4.0;
@@ -125,7 +127,7 @@ impl Field {
             let l = ((gx * gx + gy * gy + gz * gz).sqrt() / (2.0 * 2.0 * VS as f32)).max(0.25);
             coarse[x + HX * (y + HY * z)] = (at(x, y, z) / l).clamp(-8.0, 8.0);
         } } }
-        Field { ci, cg, coarse, caps: vec![], kelp: vec![], kgrid: vec![vec![]; KG * KG], obst: vec![], ogrid: vec![vec![]; KG * KG] }
+        Field { ci, cg, coarse, caps: vec![], kelp: vec![], kgrid: vec![vec![]; KG * KG], obst: vec![], ogrid: vec![vec![]; KG * KG], dynamic: vec![] }
     }
     fn cv(&self, x: i32, y: i32, z: i32) -> f64 {
         if x < 0 || y < 0 || z < 0 || x >= (CN * 4) as i32 || y >= NY as i32 || z >= (CN * 4) as i32 { return -127.0; }
@@ -199,9 +201,21 @@ impl Field {
         for i in 1..n { let t = i as f64 / n as f64; if self.kelp_dist([a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t], r) < r { return false; } }
         true
     }
-    /// distance into the loose solids and kelp stems (> 0 inside), -3 when nothing is near
+    pub fn set_dynamic(&mut self, s: Vec<[f64; 4]>) { self.dynamic = s; }
+    /// like dist, but ignoring the moving animals (for an animal checking its own way)
+    pub fn dist_static(&self, x: f64, y: f64, z: f64) -> f64 {
+        let mut d = self.dist_terrain(x, y, z);
+        let cx = ((x + 200.0) / KW).floor() as isize; let cz = ((z + 200.0) / KW).floor() as isize;
+        for gz in cz - 1..=cz + 1 { for gx in cx - 1..=cx + 1 {
+            if gx < 0 || gz < 0 || gx >= KG as isize || gz >= KG as isize { continue; }
+            for &i in &self.ogrid[gx as usize + KG * gz as usize] { let o = &self.obst[i as usize]; d = d.max(o[3] as f64 - hypot3(x - o[0] as f64, y - o[1] as f64, z - o[2] as f64)); }
+        } }
+        d
+    }
+    /// distance into the loose solids and kelp stems (> 0 inside), very negative when nothing is near
     fn props_dist(&self, x: f64, y: f64, z: f64) -> f64 {
-        let mut d = -3.0f64;
+        let mut d = -1e9f64;
+        for o in &self.dynamic { d = d.max(o[3] - hypot3(x - o[0], y - o[1], z - o[2])); }
         let cx = ((x + 200.0) / KW).floor() as isize; let cz = ((z + 200.0) / KW).floor() as isize;
         for gz in cz - 1..=cz + 1 { for gx in cx - 1..=cx + 1 {
             if gx < 0 || gz < 0 || gx >= KG as isize || gz >= KG as isize { continue; }
@@ -902,14 +916,21 @@ pub fn mesh_fish(species: usize) -> Mesh {
         1 => (vec![0.42, 0.34, 0.18, 0.0, -0.16, -0.27, -0.33], vec![0.01, 0.13, 0.27, 0.31, 0.24, 0.1, 0.05], vec![0.01, 0.04, 0.06, 0.065, 0.05, 0.025, 0.01]),
         _ => (vec![0.52, 0.42, 0.25, 0.0, -0.2, -0.33, -0.4], vec![0.01, 0.08, 0.14, 0.15, 0.1, 0.04, 0.02], vec![0.01, 0.045, 0.075, 0.08, 0.055, 0.025, 0.012]),
     };
-    let seg = 8; let mut rings = vec![];
+    // resample the profile to 12 rings for a smoother body
+    let (xs, hs, ws) = {
+        let n = 12; let k = xs.len() - 1; let (mut a, mut b, mut c) = (vec![], vec![], vec![]);
+        for i in 0..n { let t = i as f64 / (n - 1) as f64 * k as f64; let j = (t.floor() as usize).min(k - 1); let f = t - j as f64;
+            a.push(mix(xs[j], xs[j + 1], f)); b.push(mix(hs[j], hs[j + 1], f).max(0.01) * (1.0 + 0.08 * (f * PI).sin())); c.push(mix(ws[j], ws[j + 1], f).max(0.01)); }
+        (a, b, c)
+    };
+    let seg = 10; let mut rings = vec![];
     for i in 0..xs.len() { let mut r = vec![]; for k in 0..seg { let a = k as f64 / seg as f64 * TAU; r.push(m.v(xs[i], a.sin() * hs[i], a.cos() * ws[i], 0.0)); } rings.push(r); }
     for i in 0..xs.len() - 1 { for k in 0..seg { let k2 = (k + 1) % seg; m.quad(rings[i][k], rings[i + 1][k], rings[i + 1][k2], rings[i][k2]); } }
     let xe = xs[xs.len() - 1];
     // tail fin (two-sided triangles)
     let (ty, tx) = match species { 0 => (0.2, 0.22), 1 => (0.17, 0.16), _ => (0.26, 0.24) };
     let a = m.v(xe + 0.01, 0.0, 0.0, 1.0); let b = m.v(xe - tx, ty, 0.0, 1.0); let c = m.v(xe - tx * 0.6, 0.0, 0.0, 1.0); let d = m.v(xe - tx, -ty, 0.0, 1.0);
-    m.tri(a, b, c); m.tri(a, c, d); m.tri(a, c, b); m.tri(a, d, c);
+    m.tri(a, b, c); m.tri(a, c, d); // one-sided: the pipeline draws both faces, and a mirrored copy would cancel the normals
     if species > 0 {
         // dorsal + anal fins, pectoral fins
         let (dh, dx0, dx1) = if species == 1 { (0.2, 0.15, -0.25) } else { (0.11, 0.1, -0.05) };
@@ -917,12 +938,12 @@ pub fn mesh_fish(species: usize) -> Mesh {
         for sgn in [1.0, -1.0] {
             let (h0, h1) = (top(dx0) * sgn, top(dx1) * sgn);
             let p0 = m.v(dx0, h0, 0.0, 1.0); let p1 = m.v(dx1, h1, 0.0, 1.0); let p2 = m.v(dx1 - 0.08, h1 + dh * sgn * if sgn < 0.0 { 0.6 } else { 1.0 }, 0.0, 1.0);
-            m.tri(p0, p1, p2); m.tri(p0, p2, p1);
+            m.tri(p0, p1, p2);
         }
         for sz in [1.0, -1.0] {
             let w = ws[2] * 0.9;
             let p0 = m.v(xs[2] - 0.02, -0.02, sz * w, 1.0); let p1 = m.v(xs[2] - 0.16, -0.06, sz * (w + 0.09), 1.0); let p2 = m.v(xs[2] - 0.12, -0.03, sz * w, 1.0);
-            m.tri(p0, p1, p2); m.tri(p0, p2, p1);
+            m.tri(p0, p1, p2);
         }
     }
     m

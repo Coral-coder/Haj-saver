@@ -38,6 +38,11 @@ fn pal(h: f32) -> vec3f {
     default { col = mix(vec3f(.05, .40, .36), vec3f(.10, .52, .58), s1); pr = vec4f(.1, .9, .2, .04); spc = vec3f(.3, 1., .9); shp = vec2f(.6, .5); }
   }
   pr.x = step(hs(s1 * 91.7 + s2 * 37.1 + i.b.x), pr.x);
+  // Hajsaver, November: the kelp and the grasses turn orange, red and gold
+  if (abs(g.mis.w - 1.) < .5 && ty != 5 && ty != 6) {
+    let fall = select(select(vec3f(.42, .15, .025), vec3f(.36, .05, .03), hsel > .55), vec3f(.48, .32, .04), hsel > .82);
+    col = mix(col, fall * (.7 + .5 * s1), .75); spc = mix(spc, vec3f(1., .6, .2), .7);
+  }
   let k = (i.c.w - .3) * 2.0 + sin(t * (.8 + s1) * fls + s2 * 40. + hA * .25) * .10 * fls;
   let wph = v * (3. + 5. * s2) + s1 * 30. + t * 1.1;
   let wv = sin(wph) * .12 * wav;

@@ -20,14 +20,19 @@ override SP: f32 = 0.;
   fp += dv / dl * ss(g.shk.w * 3.2, 0., dl) * g.shk.w * 2.4;
   let w = fp + T * l.x + Up * l.y + S * l.z;
   o.cp = g.vp * vec4f(w, 1.); o.wp = w; o.n = T * i.n.x + Up * i.n.y + S * i.n.z; o.op = i.p; o.sd = s;
-  o.lt = shadow1(w);
+  o.lt = shadow1(fp); // one sample per fish, at its centre
   return o;
 }
-@fragment fn fsFish(i: VO) -> @location(0) vec4f {
-  let n = normalize(i.n); let L = g.sun.xyz; let V = normalize(g.cam.xyz - i.wp);
+@fragment fn fsFish(i: VO, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
+  // thin fins are seen from both sides
+  let n = normalize(i.n) * select(-1., 1., ff); let L = g.sun.xyz; let V = normalize(g.cam.xyz - i.wp);
   let z = zone(i.wp); let vv = vol(i.wp);
+  // the texture masks, mapped along the body (u nose to tail) and down the flank (v back to belly)
+  let fuv = vec2f((.52 - i.op.x) / 1.1, .5 - i.op.y / .62);
+  let tx = textureSample(tF, sR, fuv);
   var alb = mix(vec3f(.50, .68, .80), vec3f(.10, .22, .40), ss(-.05, .2, i.op.y));
   alb = mix(alb, vec3f(.95, .8, .3), step(.86, fract(i.sd * 7.7)) * .6);
+  alb = mix(alb, vec3f(.75, .78, .8), tx.a * .35);
   if (SP > .5 && SP < 1.5) {
     // reef fish: royal blue with a yellow tail, yellow tangs, and the odd orange one
     let h = fract(i.sd * 13.1);
@@ -40,11 +45,16 @@ override SP: f32 = 0.;
     // jacks: steel blue back, silver flanks, a yellow stripe and dark bars
     alb = mix(vec3f(.62, .70, .76), vec3f(.10, .20, .30), ss(-.02, .1, i.op.y));
     alb = mix(alb, vec3f(.9, .75, .2), ss(.025, 0., abs(i.op.y - .015)) * .7);
-    alb *= 1. - .35 * ss(.3, .6, sin(i.op.x * 40.)) * ss(0., .08, i.op.y);
+    alb *= 1. - .45 * tx.g * ss(-.02, .08, i.op.y);
   }
+  if (SP > .5 && SP < 1.5 && fract(i.sd * 13.1) > .85) { alb = mix(vec3f(1., .42, .05), vec3f(.95, .95, .9), tx.g); }
+  // scales catch the light, fins show their rays, and every fish gets an eye
+  alb *= tx.r;
+  alb = mix(alb, alb * .55, tx.a * step(.72, fuv.x));
+  alb = mix(alb, mix(vec3f(.85, .8, .6), vec3f(.01), step(.9, tx.b)), step(.4, tx.b));
   let E = sunE(i.wp.y, z) * i.lt;
   var c = alb * (E * (.25 + .75 * sat(dot(n, L))) + amb(i.wp, n, vv.g, z) * 1.3);
-  c += E * pow(sat(dot(n, normalize(V + L))), 24.) * 1.6 + vec3f(.3, .6, .7) * pow(1. - sat(dot(n, V)), 3.) * .25 * vv.g;
+  c += E * pow(sat(dot(n, normalize(V + L))), 24.) * (1.0 + 1.2 * tx.r * tx.r) + vec3f(.3, .6, .7) * pow(1. - sat(dot(n, V)), 3.) * .25 * vv.g;
   return fin(fog(c, i.wp, z));
 }
 @vertex fn vsManta(i: VI) -> VO {

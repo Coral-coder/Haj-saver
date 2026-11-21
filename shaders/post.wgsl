@@ -25,6 +25,9 @@ fn sat3(x: vec3f) -> vec3f { return clamp(x, vec3f(0.), vec3f(1.)); }
   let bl = textureSampleLevel(tB, sC, uv, 0.).rgb;
   c = mix(c, bl, .06) + bl * .03;
   c *= g.mis.x;
+  // Hajsaver, November: warm autumn light (g.mis.w = 1)
+  let aut = select(0., 1., abs(g.mis.w - 1.) < .5);
+  c *= mix(vec3f(1.), vec3f(1.12, 1.0, .85), aut);
   let q = uv - .5;
   c *= 1. - dot(q, q) * .55;
   c = tmap(c);
@@ -33,6 +36,9 @@ fn sat3(x: vec3f) -> vec3f { return clamp(x, vec3f(0.), vec3f(1.)); }
   c *= l / max(l0, 1e-4);
   c = mix(c, vec3f(l), ss(.55, 1., l) * .1);
   c = mix(vec3f(l), c, .93) + vec3f(.008, .002, 0.);
+  // November: a golden autumn grade on top
+  let lw = dot(c, vec3f(.3, .55, .15));
+  c = mix(c, vec3f(lw * 1.55 + .02, lw * 1.12, lw * .55), aut * .55) * mix(vec3f(1.), vec3f(1.1, 1., .84), aut);
   c = pow(max(c, vec3f(0.)), vec3f(1. / 2.2));
   let n = ign(fc.xy) + ign(fc.xy + 37.) - 1.;
   return vec4f(c + n / 255., 1.);

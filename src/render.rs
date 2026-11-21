@@ -4,12 +4,16 @@
 use crate::math::*;
 use crate::shaders::{Defs, UPSCALE};
 use crate::shark::SharkMesh;
+use crate::creatures::{self, PlushPose};
 use crate::world::*;
 use wgpu::util::DeviceExt;
 
 pub const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const UBN: usize = 84; // floats in the scene uniform block (G in g.wgsl)
+const UBN: usize = 84;
+const MAX_SHARKS: usize = 8;
+const MAX_PLUSH: usize = 8;
+const SHARK_SLOT: usize = 256; // dynamic uniform offsets must be 256-byte aligned // floats in the scene uniform block (G in g.wgsl)
 
 /// preset viewpoints (position, look-at); the world generator dresses the scene around them
 pub const POSES: [[f64; 6]; 6] = [
@@ -74,9 +78,10 @@ struct CellBuf { start: Vec<u32>, lo: Vec<f32>, hi: Vec<f32>, buf: wgpu::Buffer,
 pub struct Quality { pub lv: u32 }
 impl Quality {
     fn shadow(&self) -> u32 { if self.lv > 0 { 2048 } else { 4096 } }
-    fn aa(&self) -> u32 { if self.lv > 1 { 1 } else { 4 } }
+    /// MSAA only on High: on integrated graphics the multisampled scene pass is the single biggest cost
+    fn aa(&self) -> u32 { if self.lv > 0 { 1 } else { 4 } }
     fn water(&self) -> u32 { if self.lv > 1 { 256 } else { 512 } }
-    fn rayn(&self) -> u32 { if self.lv > 1 { 12 } else { 34 } }
+    fn rayn(&self) -> u32 { [34, 20, 12][self.lv.min(2) as usize] }
 }
 
 struct Targets {
@@ -95,6 +100,11 @@ pub struct Renderer {
     p_fish: [wgpu::RenderPipeline; 3], p_manta: wgpu::RenderPipeline, p_surf: wgpu::RenderPipeline, p_back: wgpu::RenderPipeline, p_bub: wgpu::RenderPipeline, p_snow: wgpu::RenderPipeline, p_gl: wgpu::RenderPipeline,
     p_water: wgpu::RenderPipeline, p_mip16: wgpu::RenderPipeline, p_down0: wgpu::RenderPipeline, p_down: wgpu::RenderPipeline, p_up: wgpu::RenderPipeline,
     p_rays: wgpu::RenderPipeline, p_rb: wgpu::RenderPipeline, p_post: wgpu::RenderPipeline, p_upscale: wgpu::RenderPipeline,
+    p_plush: wgpu::RenderPipeline, bg_plush: wgpu::BindGroup, ubo_plush: wgpu::Buffer, vb_plush: wgpu::Buffer, ib_plush: wgpu::Buffer, plush_ranges: [(u32, u32); 3],
+    /// 0 normal, 1 November (autumn), 2 December (Christmas)
+    pub season: u32,
+    /// one fish of each species (its instance data), for the debug camera
+    pub fish_probe: Vec<[f32; 8]>,
     p_shark: wgpu::RenderPipeline, p_shark_sh: wgpu::RenderPipeline, bg_shark: wgpu::BindGroup, ubo_shark: wgpu::Buffer, vb_shark: wgpu::Buffer, ib_shark: wgpu::Buffer, n_shark: u32,
     vb_mesh: wgpu::Buffer, ib_mesh: wgpu::Buffer, vb_terrain: wgpu::Buffer, ib_terrain: wgpu::Buffer, ib_solids: wgpu::Buffer, n_solid: u32,
     meshes: Vec<Mi>, ranges: [(u32, u32); 12], t_start: Vec<u32>, t_lo: Vec<f32>, t_hi: Vec<f32>,
@@ -123,7 +133,7 @@ pub type Progress<'a> = &'a mut dyn FnMut(&str, f32);
 impl Renderer {
     pub async fn new(device: wgpu::Device, queue: wgpu::Queue, out_fmt: wgpu::TextureFormat, lv: u32, shark: &SharkMesh, progress: Progress<'_>) -> (Renderer, Field) {
         let q = Quality { lv };
-        let defs = Defs { low: lv > 1, ms: q.aa() > 1, shadow: q.shadow(), water: q.water(), rayn: q.rayn() };
+        let defs = Defs { med: lv == 1, low: lv > 1, ms: q.aa() > 1, shadow: q.shadow(), water: q.water(), rayn: q.rayn() };
         let d = &device;
         let tu = wgpu::TextureUsages::empty();
         let tex = |w: u32, h: u32, dd: u32, format: wgpu::TextureFormat, usage: wgpu::TextureUsages, mips: u32, samples: u32| d.create_texture(&wgpu::TextureDescriptor {
@@ -144,6 +154,10 @@ impl Renderer {
         let t_vol_t = tex((NX / 2) as u32, (NY / 2) as u32, (NZ / 2) as u32, wgpu::TextureFormat::Rg8Unorm, tb | cd, 1, 1);
         let t_map_t = tex(512, 512, 1, wgpu::TextureFormat::Rgba8Unorm, tb | cd, 1, 1);
         let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+        let t_fish_t = tex(256, 128, 1, wgpu::TextureFormat::Rgba8Unorm, tb | cd, 1, 1);
+        queue.write_texture(wgpu::TexelCopyTextureInfo { texture: &t_fish_t, mip_level: 0, origin: Default::default(), aspect: Default::default() }, &creatures::fish_texture(),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 4), rows_per_image: None }, wgpu::Extent3d { width: 256, height: 128, depth_or_array_layers: 1 });
+        let t_fish = view(&t_fish_t);
         let (t_shadow, t_dummy, t_ss, t_water, t_detail, t_vol, t_map) = (view(&t_shadow_t), view(&t_dummy_t), view(&t_ss_t), view(&t_water_t), view(&t_detail_t), view(&t_vol_t), view(&t_map_t));
 
         let ub_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
@@ -161,18 +175,21 @@ impl Renderer {
         let bgl0 = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
             ent(0, vf, ubuf), ent(1, vf, samp(wgpu::SamplerBindingType::Filtering)), ent(2, vf, samp(wgpu::SamplerBindingType::Filtering)), ent(3, vf, samp(wgpu::SamplerBindingType::Comparison)),
             ent(4, vf, tex_ty(wgpu::TextureSampleType::Depth, d2, false)), ent(5, vf, tex_ty(ff, d2, false)), ent(6, vf, tex_ty(ff, d2, false)),
-            ent(7, vf, tex_ty(ff, wgpu::TextureViewDimension::D3, false)), ent(8, vf, tex_ty(ff, d2, false)), ent(9, vf, tex_ty(wgpu::TextureSampleType::Depth, d2, false)),
+            ent(7, vf, tex_ty(ff, wgpu::TextureViewDimension::D3, false)), ent(8, vf, tex_ty(ff, d2, false)), ent(9, vf, tex_ty(wgpu::TextureSampleType::Depth, d2, false)), ent(10, SS::FRAGMENT, tex_ty(ff, d2, false)),
         ] });
         let mk_bg0 = |u: &wgpu::Buffer, shv: &wgpu::TextureView, ssv: &wgpu::TextureView| d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl0, entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&s_rep) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&s_clamp) }, wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&s_cmp) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(shv) }, wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&t_water) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t_detail) }, wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&t_vol) },
-            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&t_map) }, wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(ssv) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&t_map) }, wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(ssv) }, wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&t_fish) },
         ] });
         let bg0 = mk_bg0(&ubo, &t_shadow, &t_ss); let bg0s = mk_bg0(&ubo_s, &t_dummy, &t_dummy); let bg0_ss = mk_bg0(&ubo_ss, &t_dummy, &t_dummy);
-        let bgl_shark = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[ent(0, vf, ubuf), ent(1, SS::FRAGMENT, tex_ty(ff, d2, false)), ent(2, SS::FRAGMENT, tex_ty(ff, d2, false))] });
+        let ubuf_dyn = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(96) };
+        let bgl_plush = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[ent(0, vf, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(80) })] });
+        let bgl_shark = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[ent(0, vf, ubuf_dyn), ent(1, SS::FRAGMENT, tex_ty(ff, d2, false)), ent(2, SS::FRAGMENT, tex_ty(ff, d2, false))] });
         let pl0 = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl0)], immediate_size: 0 });
+        let pl_plush = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl0), Some(&bgl_plush)], immediate_size: 0 });
         let pl_shark = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl0), Some(&bgl_shark)], immediate_size: 0 });
         let bgl_blit = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[ent(0, SS::FRAGMENT, tex_ty(ff, d2, false)), ent(1, SS::FRAGMENT, samp(wgpu::SamplerBindingType::Filtering))] });
         let pl_blit = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl_blit)], immediate_size: 0 });
@@ -203,13 +220,14 @@ impl Renderer {
         let a_anim = [at(2, 0, VF::Float32x4), at(3, 16, VF::Float32x4)];
         let a_bub = [at(0, 0, VF::Float32x4), at(1, 16, VF::Float32x4)];
         let a_snow = [at(0, 0, VF::Float32x4)];
+        let a_plush = [at(0, 0, VF::Float32x3), at(1, 12, VF::Float32x3), at(2, 24, VF::Unorm8x4), at(3, 28, VF::Float32x2)];
         let a_shark = [at(0, 0, VF::Float32x3), at(1, 12, VF::Float32x3), at(2, 24, VF::Float32x2), at(3, 32, VF::Float32)];
         let vl = |stride: u64, inst: bool, attributes: &'static [wgpu::VertexAttribute]| wgpu::VertexBufferLayout { array_stride: stride, step_mode: if inst { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex }, attributes };
         // leak the attribute arrays: they live for the program anyway
         let leak = |a: &[wgpu::VertexAttribute]| -> &'static [wgpu::VertexAttribute] { Box::leak(a.to_vec().into_boxed_slice()) };
-        let (a_solid, a_inst, a_leaf, a_anim, a_bub, a_snow, a_shark) = (leak(&a_solid), leak(&a_inst), leak(&a_leaf), leak(&a_anim), leak(&a_bub), leak(&a_snow), leak(&a_shark));
+        let (a_solid, a_inst, a_leaf, a_anim, a_bub, a_snow, a_shark, a_plush) = (leak(&a_solid), leak(&a_inst), leak(&a_leaf), leak(&a_anim), leak(&a_bub), leak(&a_snow), leak(&a_shark), leak(&a_plush));
         let vb_solid = vl(16, false, a_solid); let ib_solid = vl(48, true, a_inst); let ib_leaf = vl(36, true, a_leaf); let ib_anim = vl(32, true, a_anim);
-        let ib_bub = vl(32, true, a_bub); let ib_snow = vl(16, true, a_snow); let vb_shark_l = vl(36, false, a_shark);
+        let ib_bub = vl(32, true, a_bub); let ib_snow = vl(16, true, a_snow); let vb_shark_l = vl(36, false, a_shark); let vb_plush_l = vl(creatures::STRIDE as u64, false, a_plush);
         let aa = q.aa();
 
         struct Po<'a> { strip: bool, cull: Option<wgpu::Face>, blend: Option<wgpu::BlendState>, consts: &'a [(&'a str, f64)] }
@@ -244,6 +262,8 @@ impl Renderer {
         let p_bub = scene_pipe(&pl0, &m_spr, "vsBub", "fsBub", &[ib_bub.clone()], po(true, None, Some(pre)));
         let p_snow = scene_pipe(&pl0, &m_spr, "vsSnow", "fsSnow", &[ib_snow.clone()], po(true, None, Some(add)));
         let p_gl = scene_pipe(&pl0, &m_leaf, "vsGl", "fsGl", &[ib_bub.clone()], Po { strip: true, cull: None, blend: Some(add), consts: &[("ROWS", 7.0)] });
+        let m_plush = module(defs.plush(), "plush");
+        let p_plush = scene_pipe(&pl_plush, &m_plush, "vs", "fs", &[vb_plush_l.clone()], po(false, None, None));
         let p_shark = scene_pipe(&pl_shark, &m_shark, "vs", "fs", &[vb_shark_l.clone()], po(false, None, None));
         let p_solid_sh = shadow_pipe(&pl0, &m_solid, "vs", &[vb_solid.clone(), ib_solid.clone()], po(false, None, None));
         let p_terr_sh = shadow_pipe(&pl0, &m_solid, "vs", &[vb_solid.clone(), ib_solid.clone()], po(false, Some(wgpu::Face::Front), None));
@@ -352,6 +372,7 @@ impl Renderer {
         let cb = |p: &Pack| CellBuf { start: p.start.clone(), lo: p.lo.clone(), hi: p.hi.clone(), buf: bi(&p.buf, vtx), n: p.n };
         let chunks: Vec<CellBuf> = wd.chunks.iter().map(cb).collect(); let props: Vec<CellBuf> = wd.props.iter().map(cb).collect();
         let (big, big_f, small) = (cb(&wd.big), cb(&wd.big_f), cb(&wd.small));
+        let fish_probe: Vec<[f32; 8]> = wd.fish.iter().filter(|f| f.len() >= 8).map(|f| f[..8].try_into().unwrap()).collect();
         let fb = |v: &Vec<f32>| (bi(bytemuck::cast_slice(v), vtx), (v.len() / 8) as u32);
         let ib_fish = [fb(&wd.fish[0]), fb(&wd.fish[1]), fb(&wd.fish[2])];
         let (ib_manta, n_manta) = fb(&wd.mantas); let (ib_bub, n_bub) = fb(&wd.bubbles); let (ib_gl, n_gl) = fb(&wd.glints);
@@ -370,10 +391,20 @@ impl Renderer {
             view(&t)
         };
         let t_col = up_tex(*cw, *ch, crgba, wgpu::TextureFormat::Rgba8UnormSrgb); let t_rough = up_tex(*rw, *rh, rrgba, wgpu::TextureFormat::Rgba8Unorm);
-        let ubo_shark = mk_ubo(96);
+        let ubo_shark = mk_ubo((SHARK_SLOT * MAX_SHARKS) as u64);
         let bg_shark = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl_shark, entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: ubo_shark.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&t_col) }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&t_rough) }] });
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &ubo_shark, offset: 0, size: wgpu::BufferSize::new(96) }) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&t_col) }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&t_rough) }] });
         let vb_shark = bi(bytemuck::cast_slice(&shark.verts), vtx); let ib_shark = bi(bytemuck::cast_slice(&shark.idx), idx); let n_shark = shark.idx.len() as u32;
+
+        // ---------------------------------------------------------------- the other plush animals (whale, octopus, tree)
+        let (vb_plush, ib_plush, plush_ranges) = {
+            let ms = [creatures::whale(), creatures::octopus(), creatures::tree(7)];
+            let (mut v, mut ix, mut rg) = (vec![], vec![], [(0u32, 0u32); 3]);
+            for (k, m) in ms.iter().enumerate() { let base = (v.len() / creatures::STRIDE) as u32; rg[k] = (ix.len() as u32, m.i.len() as u32); v.extend_from_slice(&m.v); ix.extend(m.i.iter().map(|i| i + base)); }
+            (bi(&v, vtx), bi(bytemuck::cast_slice(&ix), idx), rg)
+        };
+        let ubo_plush = mk_ubo((SHARK_SLOT * MAX_PLUSH) as u64);
+        let bg_plush = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl_plush, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &ubo_plush, offset: 0, size: wgpu::BufferSize::new(80) }) }] });
 
         // ---------------------------------------------------------------- one-time bakes: detail texture, shadow map
         {
@@ -412,10 +443,10 @@ impl Renderer {
         let r = Renderer {
             device, queue, out_fmt, q, ubo, ubo_ss, ubo_w, ubo_up, ub, ub_ss, bg0, bg0_ss, s_clamp, s_rep, s_cmp, t_shadow, t_water, t_vol, t_ss,
             water_views, water_bg, bg_water, p_terrain, p_solid, p_leaf, p_leaf5, p_leaf_s, p_leaf_f, p_fish, p_manta, p_surf, p_back, p_bub, p_snow, p_gl,
-            p_water, p_mip16, p_down0, p_down, p_up, p_rays, p_rb, p_post, p_upscale, p_shark, p_shark_sh, bg_shark, ubo_shark, vb_shark, ib_shark, n_shark,
+            p_water, p_mip16, p_down0, p_down, p_up, p_rays, p_rb, p_post, p_upscale, p_plush, bg_plush, ubo_plush, vb_plush, ib_plush, plush_ranges, season: 0, fish_probe, p_shark, p_shark_sh, bg_shark, ubo_shark, vb_shark, ib_shark, n_shark,
             vb_mesh, ib_mesh, vb_terrain, ib_terrain, ib_solids, n_solid, meshes, ranges: wd.ranges, t_start: t.start, t_lo: t.lo, t_hi: t.hi,
             chunks, props, big, big_f, small, ib_fish, ib_manta, n_manta, ib_bub, n_bub, ib_snow, n_snow, ib_gl, n_gl,
-            tg: None, f: [0.0; 12], tanh: 0.6, row_ord: [0; CELLS], det: 1.0, pix: if lv > 1 { 41e4 } else { 2560.0 * 1440.0 },
+            tg: None, f: [0.0; 12], tanh: 0.6, row_ord: [0; CELLS], det: 1.0, pix: [2560.0 * 1440.0, 1280.0 * 720.0, 41e4][lv.min(2) as usize],
             dyn_t: 0.0, dyn_n: 0, dyn_bad: 0, dyn_ok: 0, dyn_wait: 3,
         };
         (r, field)
@@ -464,7 +495,7 @@ impl Renderer {
         else { self.dyn_bad = 0; if a < 12.5 { k = 15.0 / a; } else { self.dyn_ok += 1; if self.dyn_ok > self.dyn_wait { k = 1.17; self.dyn_ok = 0; } } }
         let k = clamp(k, 0.5, 1.7);
         let (dw, dh) = self.tg.as_ref().map(|t| (t.dw, t.dh)).unwrap_or((1920, 1080));
-        let top = (2560.0 * 1440.0f64).min(dw as f64 * dh as f64); let pixmin = 4e5f64.min(top); let mid = (top / 2.0).max(pixmin); let detmin = 0.4;
+        let top = (2560.0 * 1440.0f64).min(dw as f64 * dh as f64); let pixmin = 2.2e5f64.min(top); let mid = (top / 2.0).max(pixmin); let detmin = 0.4;
         let (pix, det) = (self.pix, self.det);
         if if k < 1.0 { pix > mid || det <= detmin } else { pix < mid || det >= 1.0 } {
             let end = if k < 1.0 { if det > detmin { mid } else { pixmin } } else if det < 1.0 { mid } else { top };
@@ -473,6 +504,9 @@ impl Renderer {
         self.dyn_n = 0; self.dyn_t = 0.0;
         self.resize(dw, dh);
     }
+    /// true while even the lowest resolution and draw distance are too slow (the web page then drops a level)
+    pub fn struggling(&self) -> bool { self.pix <= 2.3e5 && self.det <= 0.41 }
+    pub fn level(&self) -> u32 { self.q.lv }
     pub fn render_size(&self) -> (u32, u32) { self.tg.as_ref().map(|t| (t.w, t.h)).unwrap_or((0, 0)) }
 
     /// Draws the cells of a cell-sorted buffer that are in view and within [min_d, max_d) (scaled by `det`, but not
@@ -510,7 +544,8 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, cam: &Cam, time: f64, sk: &SharkPose, out: &wgpu::TextureView) {
+    pub fn render(&mut self, cam: &Cam, time: f64, sharks: &[SharkPose], plush: &[PlushPose], out: &wgpu::TextureView) {
+        let sk = &sharks[0];
         let tg = self.tg.as_ref().expect("resize first");
         let (w, h) = (tg.w, tg.h);
         // camera basis (right vector is horizontal)
@@ -531,7 +566,7 @@ impl Renderer {
         let zx = cx - PURPLE[0]; let zz = cz - PURPLE[1]; let zt = clamp((44.0 - (zx * zx + zz * zz).sqrt()) / 18.0, 0.0, 1.0);
         m[51] = s(zt * zt * (3.0 - 2.0 * zt));
         let ek = clamp((-cy - 8.0) / 26.0, 0.0, 1.0);
-        m[56] = s(0.62 * (0.6 + 0.4 * ek)); m[57] = 0.54; m[58] = s(self.det);
+        m[56] = s(0.62 * (0.6 + 0.4 * ek)); m[57] = 0.54; m[58] = s(self.det); m[59] = self.season as f32;
         // the shark's shadow map: an orthographic box along the sun around him
         let sun = [m[48] as f64, m[49] as f64, m[50] as f64];
         let mut ssm = [0f64; 16];
@@ -553,11 +588,18 @@ impl Renderer {
         self.queue.write_buffer(&self.ubo_ss, 0, bytemuck::cast_slice(&self.ub_ss));
         self.queue.write_buffer(&self.ubo_w, 0, bytemuck::cast_slice(&[time as f32, 0.0, 0.0, 0.0]));
         self.queue.write_buffer(&self.ubo_up, 0, bytemuck::cast_slice(&[1.0 / tg.dw as f32, 1.0 / tg.dh as f32, clamp(cam.fade, 0.0, 1.0) as f32, 0.0]));
-        {
+        let n_plush = plush.len().min(MAX_PLUSH);
+        for (i, p) in plush.iter().take(MAX_PLUSH).enumerate() {
+            let (f, up) = (p.fwd, p.up); let left = [up[1] * f[2] - up[2] * f[1], up[2] * f[0] - up[0] * f[2], up[0] * f[1] - up[1] * f[0]];
+            let u: [f32; 20] = [p.pos[0], p.pos[1], p.pos[2], p.scale, f[0], f[1], f[2], p.kind as f64, up[0], up[1], up[2], 0.0, left[0], left[1], left[2], 0.0, p.a[0], p.a[1], p.a[2], 0.0].map(|v| v as f32);
+            self.queue.write_buffer(&self.ubo_plush, (i * SHARK_SLOT) as u64, bytemuck::cast_slice(&u));
+        }
+        let n_sharks = sharks.len().min(MAX_SHARKS);
+        for (i, sk) in sharks.iter().take(MAX_SHARKS).enumerate() {
             let up = sk.up; let fw = sk.fwd; let left = [up[1] * fw[2] - up[2] * fw[1], up[2] * fw[0] - up[0] * fw[2], up[0] * fw[1] - up[1] * fw[0]];
             let u: [f32; 24] = [sk.pos[0], sk.pos[1], sk.pos[2], sk.scale, fw[0], fw[1], fw[2], 0.0, up[0], up[1], up[2], 0.0, left[0], left[1], left[2], 0.0,
                 sk.a[0], sk.a[1], sk.a[2], sk.a[3], sk.b[0], sk.b[1], sk.b[2], sk.b[3]].map(|v| v as f32);
-            self.queue.write_buffer(&self.ubo_shark, 0, bytemuck::cast_slice(&u));
+            self.queue.write_buffer(&self.ubo_shark, (i * SHARK_SLOT) as u64, bytemuck::cast_slice(&u));
         }
         {
             let mut cr = clamp(((cz - OZ) / CELLW).floor(), 0.0, CELLS as f64 - 1.0) as isize; if cr < 0 { cr = 0; }
@@ -573,8 +615,9 @@ impl Renderer {
         // the shark's shadow
         {
             let mut r = e.begin_render_pass(&wgpu::RenderPassDescriptor { label: None, color_attachments: &[], depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.t_ss, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }), timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
-            r.set_pipeline(&self.p_shark_sh); r.set_bind_group(0, &self.bg0_ss, &[]); r.set_bind_group(1, &self.bg_shark, &[]);
-            r.set_vertex_buffer(0, self.vb_shark.slice(..)); r.set_index_buffer(self.ib_shark.slice(..), wgpu::IndexFormat::Uint32); r.draw_indexed(0..self.n_shark, 0, 0..1);
+            r.set_pipeline(&self.p_shark_sh); r.set_bind_group(0, &self.bg0_ss, &[]);
+            r.set_vertex_buffer(0, self.vb_shark.slice(..)); r.set_index_buffer(self.ib_shark.slice(..), wgpu::IndexFormat::Uint32);
+            for i in 0..n_sharks { r.set_bind_group(1, &self.bg_shark, &[(i * SHARK_SLOT) as u32]); r.draw_indexed(0..self.n_shark, 0, 0..1); }
         }
         // scene
         {
@@ -606,8 +649,17 @@ impl Renderer {
                 r.set_pipeline(&self.p_fish[sp]); r.set_vertex_buffer(1, b.slice(..)); let mm = &self.meshes[mid]; r.draw_indexed(mm.i0..mm.i0 + mm.n, mm.v0, 0..*n);
             }
             // the shark
-            r.set_pipeline(&self.p_shark); r.set_bind_group(1, &self.bg_shark, &[]);
-            r.set_vertex_buffer(0, self.vb_shark.slice(..)); r.set_index_buffer(self.ib_shark.slice(..), wgpu::IndexFormat::Uint32); r.draw_indexed(0..self.n_shark, 0, 0..1);
+            r.set_pipeline(&self.p_shark);
+            r.set_vertex_buffer(0, self.vb_shark.slice(..)); r.set_index_buffer(self.ib_shark.slice(..), wgpu::IndexFormat::Uint32);
+            for i in 0..n_sharks { r.set_bind_group(1, &self.bg_shark, &[(i * SHARK_SLOT) as u32]); r.draw_indexed(0..self.n_shark, 0, 0..1); }
+            // whale, octopuses, tree
+            if n_plush > 0 {
+                r.set_pipeline(&self.p_plush); r.set_vertex_buffer(0, self.vb_plush.slice(..)); r.set_index_buffer(self.ib_plush.slice(..), wgpu::IndexFormat::Uint32);
+                for (i, p) in plush.iter().take(n_plush).enumerate() {
+                    let (i0, n) = self.plush_ranges[(p.kind as usize).min(2)];
+                    r.set_bind_group(1, &self.bg_plush, &[(i * SHARK_SLOT) as u32]); r.draw_indexed(i0..i0 + n, 0, 0..1);
+                }
+            }
             // kelp and plants: 9-row blades up close, 5 rows mid-range, a decimated set far away
             if self.big.n > 0 {
                 r.set_pipeline(&self.p_leaf); r.set_vertex_buffer(0, self.big.buf.slice(..)); self.draw_cells(&mut r, &self.big.start, &self.big.lo, &self.big.hi, 5.0, DrawKind::Strip(18), 0.0, 24.0);

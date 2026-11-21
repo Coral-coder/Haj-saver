@@ -164,7 +164,7 @@ fn run(hwnd: HWND, mut wdt: u32, mut hgt: u32, mode: Mode) {
     let (tx, rx) = mpsc::channel();
     let dq = (device.clone(), queue.clone());
     std::thread::spawn(move || {
-        let app = pollster::block_on(hajsaver::App::new(dq.0, dq.1, fmt, lv, seed, &mut |_, _| {}));
+        let app = pollster::block_on(hajsaver::App::new(dq.0, dq.1, fmt, lv, seed, hajsaver::season_for_month(hajsaver::month_now()), &mut |_, _| {}));
         let _ = tx.send(app);
     });
     let mut app = loop {

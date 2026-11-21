@@ -8,6 +8,7 @@
 @group(0) @binding(7) var tV: texture_3d<f32>;
 @group(0) @binding(8) var tM: texture_2d<f32>;
 @group(0) @binding(9) var tSS: texture_depth_2d;
+@group(0) @binding(10) var tF: texture_2d<f32>; // Hajsaver: fish texture masks (creatures::fish_texture)
 // Hajsaver: the shark's moving shadow (a small map that follows him, re-rendered every frame)
 fn sharkSh(p: vec3f) -> f32 {
   let s = g.ssm * vec4f(p, 1.);
@@ -23,6 +24,7 @@ fn shadow4(p: vec3f) -> f32 {
 }
 fn shadow9(p: vec3f) -> f32 {
   if (LOW) { return shadow1(p); }
+  if (MED) { return shadow4(p); }
   let s = shUV(p); let e = 2.1 / {{SHADOW}}.; var a = 0.;
   for (var x = -1; x <= 1; x++) { for (var y = -1; y <= 1; y++) { a += textureSampleCompareLevel(tSh, sS, s.xy + vec2f(f32(x), f32(y)) * e, s.z); } }
   return a / 9. * sharkSh(p);

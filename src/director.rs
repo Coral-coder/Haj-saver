@@ -28,7 +28,7 @@ impl Director {
         d
     }
     fn ok_spot(field: &Field, p: V3, target: V3) -> bool {
-        field.dist(p[0], p[1], p[2]) < -1.0 && p[1] < -2.5 && field.clear_line(p, target, 0.25) && field.kelp_dist(p, 1.6) >= 1.6 && field.clear_of_kelp(p, target, 0.9)
+        field.dist(p[0], p[1], p[2]) < -1.0 && p[1] < -2.5 && field.clear_line(p, target, 0.25) && field.kelp_dist(p, 2.4) >= 2.4 && field.clear_of_kelp(p, target, 1.0)
     }
     /// sets up a shot; returns false when it has no good camera position right now
     fn setup(&mut self, s: Shot, sk: &Shark, field: &Field) -> bool {
