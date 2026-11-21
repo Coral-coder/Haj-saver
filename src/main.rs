@@ -67,7 +67,17 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
     app.advance(start);
     for i in 0..frames {
         if i > 0 { app.advance(every); }
-        app.frame(1.0 / 60.0, &view);
+        if args_has("--mouth") {
+            // debug close-up of the head, slightly from below, to check the teeth
+            let sk = app.shark.pose(); let f = sk.fwd; let u = sk.up;
+            let head = [sk.pos[0] + f[0] * 0.95, sk.pos[1] + f[1] * 0.95 - 0.12, sk.pos[2] + f[2] * 0.95];
+            let p = [head[0] + f[0] * 1.3 - u[0] * 0.35, head[1] + f[1] * 1.3 - u[1] * 0.35, head[2] + f[2] * 1.3 - u[2] * 0.35];
+            let d = [head[0] - p[0], head[1] - p[1], head[2] - p[2]];
+            let cam = hajsaver::render::Cam { pos: p, yaw: d[0].atan2(-d[2]), pitch: d[1].atan2((d[0] * d[0] + d[2] * d[2]).sqrt()), tanh: 0.35, fade: 1.0 };
+            app.r.render(&cam, app.time, &sk, &view);
+        } else {
+            app.frame(1.0 / 60.0, &view);
+        }
         let mut e = app.r.device.create_command_encoder(&Default::default());
         e.copy_texture_to_buffer(wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: Default::default(), aspect: Default::default() },
             wgpu::TexelCopyBufferInfo { buffer: &rb, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: None } }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
@@ -83,3 +93,6 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         eprintln!("{p}: t={:.1} shot={:?} shark=({:.1},{:.1},{:.1}) speed {:.2}", app.time, app.dir.shot, s.pos[0], s.pos[1], s.pos[2], s.speed);
     }
 }
+
+#[cfg(not(windows))]
+fn args_has(k: &str) -> bool { std::env::args().any(|a| a == k) }

@@ -61,7 +61,7 @@ fn dirWorld(n: vec3f) -> vec3f { return -n.x * sk.fwd.xyz + n.y * sk.up.xyz + n.
 // the teeth texture did not survive the model's export: soft white triangles cut from their UVs instead
 fn tooth(uv: vec2f) -> f32 {
   let v0 = .0285; let v1 = .0588; let vm = (v0 + v1) * .5; let hw = (v1 - v0) * .5;
-  let tl = (uv.x - .0605) / (.0855 - .0605); let tu = (.0505 - uv.x) / (.0505 - .0200);
+  let tl = (.0855 - uv.x) / (.0855 - .0605); let tu = (.0505 - uv.x) / (.0505 - .0200);
   let t = select(tu, tl, uv.x > .0555);
   if (t < 0. || t > 1. || uv.y < v0 || uv.y > v1) { return 0.; }
   return step(abs(uv.y - vm), hw * pow(1. - t, .75));
