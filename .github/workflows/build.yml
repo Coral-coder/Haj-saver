@@ -1,15 +1,21 @@
-# Builds the Windows screensaver (Hajsaver.scr) and the WebAssembly page, and publishes both to GitHub Pages from
-# the default branch. Other branches and pull requests get the build and a downloadable Hajsaver.scr artifact.
-# One-time setup: Settings -> Pages -> Source: GitHub Actions.
+# Builds the Windows screensaver (Hajsaver.scr) and the WebAssembly page.
+# On the default branch it also:
+#   - publishes the page to the gh-pages branch (GitHub Pages serves it; no Pages settings needed beyond
+#     "Deploy from a branch: gh-pages", which GitHub picks automatically for a new gh-pages branch)
+#   - updates the "latest" GitHub Release with Hajsaver.scr attached
+# Pushing a tag like v1.0.0 makes a versioned release too. Other branches and pull requests just build, and
+# upload Hajsaver.scr as a workflow artifact.
 name: Build
 
 on:
   push:
+    branches: ['**', '!gh-pages']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -30,20 +36,31 @@ jobs:
         with:
           name: Hajsaver.scr
           path: web/Hajsaver.scr
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
 
-  deploy:
-    needs: build
-    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      - name: Publish the page (gh-pages branch)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web
+          publish_branch: gh-pages
+          force_orphan: true
+          enable_jekyll: false
+
+      - name: Release "latest"
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag -f latest && git push -f origin latest
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "Hajsaver (latest build)" --notes "Built from ${GITHUB_SHA}. Download Hajsaver.scr, right-click it and choose Install."
+          gh release edit latest --notes "Built from ${GITHUB_SHA}. Download Hajsaver.scr, right-click it and choose Install." --prerelease=false
+          gh release upload latest web/Hajsaver.scr --clobber
+
+      - name: Release for a version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Hajsaver $GITHUB_REF_NAME" --notes "Download Hajsaver.scr, right-click it and choose Install."
+          gh release upload "$GITHUB_REF_NAME" web/Hajsaver.scr --clobber
