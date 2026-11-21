@@ -29,6 +29,10 @@ fn bend(i: PI_) -> DF {
     p += out * (wv + jet * .25 * s * s) + vec3f(0., (sin(ph + k) * .06 - jet * .18) * s * s, 0.);
     // the head swells a little as it breathes
     if (s == 0.) { p *= 1. + .03 * sin(ph * .8); }
+  } else if (kind == 3) {
+    // food: tumbles as it sinks
+    p = rotX(p, ph * 1.7);
+    n = rotX(n, ph * 1.7);
   } else {
     // tree: a gentle sway in the current, more toward the top
     let h = i.an.x;

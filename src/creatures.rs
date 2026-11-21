@@ -90,6 +90,9 @@ pub fn whale() -> PMesh {
     m
 }
 
+/// a food pellet: a little crumpled flake
+pub fn pellet() -> PMesh { let mut m = PMesh::default(); m.sphere([0.0; 3], [0.12, 0.06, 0.1], [214, 140, 70, 200], [0.0, 0.0], 4); m }
+
 /// BLÅVINGAD-style octopus: a round yellow head and eight short curling tentacles. About 1 m across at scale 1.
 /// anim.x: 0 on the head, 0..1 along a tentacle; anim.y: the tentacle's angle / TAU.
 pub fn octopus() -> PMesh {

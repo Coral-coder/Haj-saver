@@ -12,7 +12,7 @@ pub const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const UBN: usize = 84;
 const MAX_SHARKS: usize = 8;
-const MAX_PLUSH: usize = 8;
+const MAX_PLUSH: usize = 48;
 const SHARK_SLOT: usize = 256; // dynamic uniform offsets must be 256-byte aligned // floats in the scene uniform block (G in g.wgsl)
 
 /// preset viewpoints (position, look-at); the world generator dresses the scene around them
@@ -100,7 +100,7 @@ pub struct Renderer {
     p_fish: [wgpu::RenderPipeline; 3], p_manta: wgpu::RenderPipeline, p_surf: wgpu::RenderPipeline, p_back: wgpu::RenderPipeline, p_bub: wgpu::RenderPipeline, p_snow: wgpu::RenderPipeline, p_gl: wgpu::RenderPipeline,
     p_water: wgpu::RenderPipeline, p_mip16: wgpu::RenderPipeline, p_down0: wgpu::RenderPipeline, p_down: wgpu::RenderPipeline, p_up: wgpu::RenderPipeline,
     p_rays: wgpu::RenderPipeline, p_rb: wgpu::RenderPipeline, p_post: wgpu::RenderPipeline, p_upscale: wgpu::RenderPipeline,
-    p_plush: wgpu::RenderPipeline, bg_plush: wgpu::BindGroup, ubo_plush: wgpu::Buffer, vb_plush: wgpu::Buffer, ib_plush: wgpu::Buffer, plush_ranges: [(u32, u32); 3],
+    p_plush: wgpu::RenderPipeline, bg_plush: wgpu::BindGroup, ubo_plush: wgpu::Buffer, vb_plush: wgpu::Buffer, ib_plush: wgpu::Buffer, plush_ranges: [(u32, u32); 4],
     /// 0 normal, 1 November (autumn), 2 December (Christmas)
     pub season: u32,
     /// one fish of each species (its instance data), for the debug camera
@@ -398,8 +398,8 @@ impl Renderer {
 
         // ---------------------------------------------------------------- the other plush animals (whale, octopus, tree)
         let (vb_plush, ib_plush, plush_ranges) = {
-            let ms = [creatures::whale(), creatures::octopus(), creatures::tree(7)];
-            let (mut v, mut ix, mut rg) = (vec![], vec![], [(0u32, 0u32); 3]);
+            let ms = [creatures::whale(), creatures::octopus(), creatures::tree(7), creatures::pellet()];
+            let (mut v, mut ix, mut rg) = (vec![], vec![], [(0u32, 0u32); 4]);
             for (k, m) in ms.iter().enumerate() { let base = (v.len() / creatures::STRIDE) as u32; rg[k] = (ix.len() as u32, m.i.len() as u32); v.extend_from_slice(&m.v); ix.extend(m.i.iter().map(|i| i + base)); }
             (bi(&v, vtx), bi(bytemuck::cast_slice(&ix), idx), rg)
         };
@@ -656,7 +656,7 @@ impl Renderer {
             if n_plush > 0 {
                 r.set_pipeline(&self.p_plush); r.set_vertex_buffer(0, self.vb_plush.slice(..)); r.set_index_buffer(self.ib_plush.slice(..), wgpu::IndexFormat::Uint32);
                 for (i, p) in plush.iter().take(n_plush).enumerate() {
-                    let (i0, n) = self.plush_ranges[(p.kind as usize).min(2)];
+                    let (i0, n) = self.plush_ranges[(p.kind as usize).min(3)];
                     r.set_bind_group(1, &self.bg_plush, &[(i * SHARK_SLOT) as u32]); r.draw_indexed(i0..i0 + n, 0, 0..1);
                 }
             }

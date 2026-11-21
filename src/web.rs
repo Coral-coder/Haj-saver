@@ -4,6 +4,23 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+// what the page asks for (mouse, touch, keys, buttons), queued until the next frame
+enum Cmd { Look(f64, f64), Zoom(f64), Explore(bool), Feed }
+thread_local! {
+    static CMDS: RefCell<Vec<Cmd>> = const { RefCell::new(Vec::new()) };
+    static MOVE: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+/// drag: dx, dy in CSS pixels (orbits the shot, or turns your head while exploring)
+#[wasm_bindgen] pub fn look(dx: f64, dy: f64) { CMDS.with(|c| c.borrow_mut().push(Cmd::Look(dx, dy))); }
+/// wheel / pinch: factor > 1 moves further out
+#[wasm_bindgen] pub fn zoom(f: f64) { CMDS.with(|c| c.borrow_mut().push(Cmd::Zoom(f))); }
+/// free swimming on or off
+#[wasm_bindgen] pub fn explore(on: bool) { CMDS.with(|c| c.borrow_mut().push(Cmd::Explore(on))); }
+/// drop food in front of the camera
+#[wasm_bindgen] pub fn feed() { CMDS.with(|c| c.borrow_mut().push(Cmd::Feed)); }
+/// while exploring: x right, y up, z forward (-1..1), fast 0/1
+#[wasm_bindgen] pub fn set_move(x: f64, y: f64, z: f64, fast: f64) { MOVE.with(|m| m.set([x, y, z, fast])); }
+
 fn status(msg: &str) {
     if let Some(e) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("status")) { e.set_text_content(Some(msg)); }
 }
@@ -47,6 +64,10 @@ pub async fn run(canvas_id: String, level: u32, month: u32) -> Result<(), JsValu
                 s.cfg.width = w; s.cfg.height = h; canvas.set_width(w); canvas.set_height(h);
                 surface.configure(&device, &s.cfg); s.app.resize(w, h);
             }
+            for c in CMDS.with(|c| std::mem::take(&mut *c.borrow_mut())) {
+                match c { Cmd::Look(x, y) => s.app.look(x, y), Cmd::Zoom(f) => s.app.zoom(f), Cmd::Explore(on) => s.app.set_explore(on), Cmd::Feed => s.app.feed() }
+            }
+            let m = MOVE.with(|m| m.get()); s.app.user.mv = [m[0], m[1], m[2]]; s.app.user.fast = m[3] > 0.5;
             let dt = ((now - s.last) / 1000.0).clamp(0.0, 0.1); let dtr = now - s.last; s.last = now;
             if let wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture() {
                 let view = frame.texture.create_view(&Default::default());

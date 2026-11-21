@@ -136,6 +136,8 @@ pub struct Shark {
     goal: V3, goal_until: f64, rng: u32,
     /// set by the App: where the camera is (for the follower) and where the others are (to keep apart)
     pub cam: V3, pub cam_fwd: V3, pub others: Vec<V3>,
+    /// the nearest food pellet, set by the App while there is food in the water: everyone goes for it
+    pub food: Option<V3>,
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role { Route, Roam, Follow }
@@ -152,7 +154,7 @@ impl Shark {
         let fwd = norm([q[0] - p[0], 0.0, q[2] - p[2]]);
         Shark { pos, fwd, up: [0.0, 1.0, 0.0], speed: 1.6, u: start, dir: 1.0, target_speed: 1.6, burst: 0.0, next_burst: 25.0, t: 0.0,
             yaw_rate: 0.0, pitch_rate: 0.0, bank: 0.0, phase: 0.0, flap_l: 0.0, flap_r: 0.0, fl_v: [0.0; 2], dorsal: 0.0, dorsal_v: 0.0, detour: None, ring_a: 0.0, stuck: 0.0, escape: 0.0, flipped: -99.0,
-            size: 1.0, role: Role::Route, goal: pos, goal_until: 0.0, rng: 1, cam: pos, cam_fwd: [0.0, 0.0, 1.0], others: vec![] }
+            size: 1.0, role: Role::Route, goal: pos, goal_until: 0.0, rng: 1, cam: pos, cam_fwd: [0.0, 0.0, 1.0], others: vec![], food: None }
     }
     /// a little free-roaming shark (size 0.33..0.5) starting near p
     pub fn little(path: &FlyPath, field: &Field, start: f64, size: f64, seed: u32) -> Shark {
@@ -203,7 +205,11 @@ impl Shark {
         if self.t > self.next_burst { self.burst = 2.6; self.next_burst = self.t + 30.0 + 40.0 * (0.5 + 0.5 * wob(self.t * 3.0, 9.0)); }
         self.burst = (self.burst - dt).max(0.0);
         self.target_speed = (1.5 + 0.5 * wob(self.t, 0.3) + if self.burst > 0.0 { 2.4 } else { 0.0 }) * (0.55 + 0.45 * sz);
-        if self.role == Role::Follow {
+        if let Some(f) = self.food {
+            // food! a quick dash, slowing to snap it up
+            let d = len(sub(f, self.pos));
+            self.target_speed = clamp(0.8 + d * 0.5, 0.8, 5.5) * (0.6 + 0.4 * sz);
+        } else if self.role == Role::Follow {
             // keep up with the camera: faster when far behind, easy when alongside
             let d = len(sub(self.follow_target(), self.pos));
             self.target_speed = clamp(0.6 + d * 0.6, 0.6, 6.0);
@@ -215,6 +221,7 @@ impl Shark {
             for s in SIGHTS { let d = len(sub(s, self.pos)); if d < 30.0 && d > 8.0 { self.detour = Some((s, self.t + 16.0)); self.ring_a = (self.pos[2] - s[2]).atan2(self.pos[0] - s[0]); break; } }
         }
         let mut target = match self.role { Role::Route => self.route_target(path), Role::Roam => self.roam_target(field), Role::Follow => self.follow_target() };
+        if let Some(f) = self.food { target = f; self.detour = None; }
         if let Some((s, until)) = self.detour {
             // circle the sight a few metres out, on a ring that stays in open water
             self.ring_a += dt * 0.3;
@@ -336,5 +343,7 @@ impl Shark {
         let z = self.size; let f = self.fwd; let l = norm(cross(self.up, f)); let p = self.pos; let at = |a: f64, s: f64| add(add(p, mul(f, LENGTH * z * a)), mul(l, s * z));
         [(at(0.40, 0.0), 0.28 * z), (at(0.22, 0.0), 0.42 * z), (at(0.0, 0.0), 0.48 * z), (at(-0.2, 0.0), 0.38 * z), (at(-0.4, 0.0), 0.25 * z), (at(0.08, 0.62), 0.16 * z), (at(0.08, -0.62), 0.16 * z)]
     }
+    /// where the mouth is (for eating)
+    pub fn mouth(&self) -> V3 { add(self.pos, mul(self.fwd, self.length() * 0.42)) }
     pub fn vel(&self) -> V3 { mul(self.fwd, self.speed) }
 }

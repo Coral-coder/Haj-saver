@@ -62,15 +62,22 @@ It covers every monitor. Moving the mouse or pressing a key ends it. The small p
 
 ## Web version
 
-`web/index.html` loads the same renderer compiled to WebAssembly. It needs a browser with WebGPU, such as a
-current Chrome or Edge. Double-click or press `F` for full screen. Add `?q=0`, `?q=1` or `?q=2` to the URL to set
-the detail level (High, Medium or Low).
+`web/index.html` loads the same renderer compiled to WebAssembly. It needs a browser with WebGPU: a current Chrome,
+Edge or Safari. It is at https://coral-coder.github.io/Haj-saver/.
 
-The page is at https://coral-coder.github.io/Haj-saver/.
+- **Look around:** drag with the mouse or a finger to swing the camera around whoever the shot is following. Scroll
+  or pinch to zoom. Leave it alone and the camera eases back to the director's shot.
+- **🤿 Explore:** swim around freely while the sharks carry on around you. Use WASD or the arrow keys, Q / E to go
+  down and up, and Shift to go faster. On a phone, use the on-screen joystick and drag to look. **🎬 Watch** goes back.
+- **🍤 Feed:** drops a handful of food in front of you, and every shark in range comes for it. G feeds, X explores,
+  and F or a double-click goes full screen.
+- **ⓘ:** the detail level (High, Medium or Low), the Windows screensaver download, and the credits. `?q=0`, `?q=1`
+  or `?q=2` in the URL sets the detail level, and `?month=11` or `?month=12` tries the seasons.
+- **On a phone:** use *Share → Add to Home Screen* (iPhone) or *Install app* (Android). It then opens full screen
+  like an app, and it also works offline.
 
-The workflow in `.github/workflows/build.yml` builds both. On `main` it deploys the page to GitHub Pages
-(source: GitHub Actions) and updates the `latest` release with `Hajsaver.scr`. A tag like `v1.0.0` makes a
-versioned release.
+The workflow in `.github/workflows/build.yml` builds both versions. On `main` it deploys the page to GitHub Pages
+(source: GitHub Actions) and updates the `latest` release with `Hajsaver.scr`.
 
 ## Building
 

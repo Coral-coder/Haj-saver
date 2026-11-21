@@ -41,6 +41,13 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         let (mut lworst, mut ftime, mut fdist) = (-9.0f64, 0.0f64, 0.0f64); let mut minp = [1e9f64; 3]; let mut maxp = [-1e9f64; 3]; let mut slow = 0.0;
         while t < secs {
             let cam = app.advance(1.0 / 30.0); t += 1.0 / 30.0;
+            if args_has("--feed") {
+                if (t * 30.0).round() as i64 % (30 * 60) == 30 { app.feed(); }
+                if (t * 30.0).round() as i64 % 60 == 0 && !app.food.is_empty() {
+                    let near = |p: [f64; 3]| app.food.iter().map(|f| hajsaver::shark::v3::len(hajsaver::shark::v3::sub(f.0, p))).fold(1e9, f64::min);
+                    eprintln!("t={:.0} food {} main {:.1}m v={:.1} little {:?}", t, app.food.len(), near(app.shark.mouth()), app.shark.speed, app.little.iter().map(|l| (near(l.mouth()) * 10.0).round() / 10.0).collect::<Vec<_>>());
+                }
+            }
             let s = &app.shark; let f = app.field();
             let d = s.body_spheres().iter().map(|(k, r)| f.dist(k[0], k[1], k[2]) + r).fold(-9.0f64, f64::max); worst = worst.max(d); if d > 0.05 { in_rock += 1.0 / 30.0; }
             if f.dist(cam.pos[0], cam.pos[1], cam.pos[2]) > -0.2 { cam_rock += 1.0 / 30.0; }
@@ -71,6 +78,9 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
     let bpr = (w * 4).div_ceil(256) * 256;
     let rb = app.r.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
     app.advance(start);
+    if args_has("--feed") { app.feed(); eprintln!("fed: {} pellets", app.food.len()); }
+    if args_has("--orbit") { app.look(260.0, -60.0); }
+    if args_has("--explore") { app.set_explore(true); app.look(-150.0, 30.0); app.user.mv = [0.0, 0.0, 1.0]; }
     for i in 0..frames {
         if i > 0 { app.advance(every); }
         if let Ok(what) = std::env::var("HAJ_LOOK") {
@@ -126,7 +136,7 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         drop(data); rb.unmap();
         let p = format!("{out}/shot{i:02}.png"); img.save(&p).unwrap();
         let s = &app.shark;
-        eprintln!("{p} ({:.0} ms): t={:.1} shot={:?} shark=({:.1},{:.1},{:.1}) speed {:.2}", tf.elapsed().as_secs_f64() * 1000.0, app.time, app.dir.shot, s.pos[0], s.pos[1], s.pos[2], s.speed);
+        eprintln!("{p} ({:.0} ms): food left {} t={:.1} shot={:?} shark=({:.1},{:.1},{:.1}) speed {:.2}", tf.elapsed().as_secs_f64() * 1000.0, app.food.len(), app.time, app.dir.shot, s.pos[0], s.pos[1], s.pos[2], s.speed);
     }
 }
 
