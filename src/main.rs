@@ -38,9 +38,17 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         let secs: f64 = std::env::args().nth(i + 1).unwrap().parse().unwrap();
         let (mut t, mut worst, mut in_rock, mut cam_rock, mut hidden, mut far) = (0.0, -9.0f64, 0.0, 0.0, 0.0, 0.0);
         let mut shots: std::collections::BTreeMap<String, (u32, f64)> = Default::default(); let mut last = String::new();
-        let (mut lworst, mut ftime, mut fdist) = (-9.0f64, 0.0f64, 0.0f64); let mut minp = [1e9f64; 3]; let mut maxp = [-1e9f64; 3]; let mut slow = 0.0;
+        let (mut lworst, mut ftime, mut fdist) = (-9.0f64, 0.0f64, 0.0f64); let mut hist: Vec<Vec<[f64; 3]>> = vec![]; let (mut stall, mut worst_stall, mut longest) = ([0.0f64; 7], [0.0f64; 7], [0.0f64; 7]); let mut minp = [1e9f64; 3]; let mut maxp = [-1e9f64; 3]; let mut slow = 0.0;
         while t < secs {
             let cam = app.advance(1.0 / 30.0); t += 1.0 / 30.0;
+            if std::env::var("HAJ_TRACE2").is_ok() && t < 30.0 && (t * 30.0).round() as i64 % 15 == 0 { eprintln!("trace t={t:.1} pos=({:.1},{:.1},{:.1}) v={:.2} esc={}", app.shark.pos[0], app.shark.pos[1], app.shark.pos[2], app.shark.speed, app.shark.stuck_events); }
+            // independent stall check: every second, compare each shark with where it was 4 s ago
+            if (t * 30.0).round() as i64 % 30 == 0 {
+                let now: Vec<[f64; 3]> = std::iter::once(app.shark.pos).chain(app.little.iter().map(|l| l.pos)).collect();
+                if hist.len() >= 4 { let old = &hist[hist.len() - 4];
+                    for (k, p) in now.iter().enumerate() { let d: f64 = hajsaver::shark::v3::len(hajsaver::shark::v3::sub(*p, old[k])); if d < 1.3 { stall[k] += 1.0; worst_stall[k] += 1.0; longest[k] = longest[k].max(worst_stall[k]); } else { worst_stall[k] = 0.0; } } }
+                hist.push(now);
+            }
             if args_has("--feed") {
                 if (t * 30.0).round() as i64 % (30 * 60) == 30 { app.feed(); }
                 if (t * 30.0).round() as i64 % 60 == 0 && !app.food.is_empty() {
@@ -67,6 +75,7 @@ async fn headless(out: &str, w: u32, h: u32, start: f64, frames: usize, every: f
         eprintln!("worst body penetration {worst:.2} m; touching (>5 cm) for {in_rock:.1} s; slow {slow:.1} s; camera in rock {cam_rock:.1} s; shark hidden {hidden:.1} s; far {far:.1} s");
         eprintln!("little sharks: worst penetration {lworst:.2} m; following the camera {ftime:.0} s at {:.1} m on average", fdist / ftime.max(1e-9));
         for l in &app.little { eprintln!("  little {:.2}: at ({:.0},{:.0},{:.0})", l.size, l.pos[0], l.pos[1], l.pos[2]); }
+        eprintln!("stalled seconds (moved < 1.3 m in 4 s) per shark {:?}; longest stall {:?} s; stuck turnarounds: big {} little {:?}", stall, longest, app.shark.stuck_events, app.little.iter().map(|l| l.stuck_events).collect::<Vec<_>>());
         eprintln!("shark range x {:.0}..{:.0} y {:.0}..{:.0} z {:.0}..{:.0}", minp[0], maxp[0], minp[1], maxp[1], minp[2], maxp[2]);
         for (k, v) in shots { eprintln!("  {k:8} {:4} shots, {:6.0} s, avg {:.1} s", v.0, v.1, v.1 / v.0 as f64); }
         return;

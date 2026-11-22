@@ -128,7 +128,7 @@ pub struct Shark {
     yaw_rate: f64, pitch_rate: f64, bank: f64, phase: f64,
     flap_l: f64, flap_r: f64, fl_v: [f64; 2], dorsal: f64, dorsal_v: f64,
     /// a wanted detour target (pos) that overrides the route for a while
-    detour: Option<(V3, f64)>, ring_a: f64, stuck: f64, escape: f64, flipped: f64,
+    detour: Option<(V3, f64)>, ring_a: f64, escape: f64, flipped: f64,
     /// 1 for the big shark; the little ones are 0.33..0.5
     pub size: f64,
     pub role: Role,
@@ -138,6 +138,12 @@ pub struct Shark {
     pub cam: V3, pub cam_fwd: V3, pub others: Vec<V3>,
     /// the nearest food pellet, set by the App while there is food in the water: everyone goes for it
     pub food: Option<V3>,
+    /// where he was over the last few seconds (every half second), to tell when he is really stuck
+    hist: std::collections::VecDeque<V3>, hist_t: f64,
+    /// the way out he picked when he got stuck, and a lure he gave up on (food he could not reach) until a time
+    escape_dir: V3, pub food_block: Option<(V3, f64)>, chase_at: V3, chase_t: f64,
+    /// how many times he got stuck (for the --sim statistics)
+    pub stuck_events: u32,
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role { Route, Roam, Follow }
@@ -153,8 +159,8 @@ impl Shark {
         for _ in 0..40 { if field.dist(pos[0], pos[1], pos[2]) < -1.2 { break; } pos[1] += 0.5; }
         let fwd = norm([q[0] - p[0], 0.0, q[2] - p[2]]);
         Shark { pos, fwd, up: [0.0, 1.0, 0.0], speed: 1.6, u: start, dir: 1.0, target_speed: 1.6, burst: 0.0, next_burst: 25.0, t: 0.0,
-            yaw_rate: 0.0, pitch_rate: 0.0, bank: 0.0, phase: 0.0, flap_l: 0.0, flap_r: 0.0, fl_v: [0.0; 2], dorsal: 0.0, dorsal_v: 0.0, detour: None, ring_a: 0.0, stuck: 0.0, escape: 0.0, flipped: -99.0,
-            size: 1.0, role: Role::Route, goal: pos, goal_until: 0.0, rng: 1, cam: pos, cam_fwd: [0.0, 0.0, 1.0], others: vec![], food: None }
+            yaw_rate: 0.0, pitch_rate: 0.0, bank: 0.0, phase: 0.0, flap_l: 0.0, flap_r: 0.0, fl_v: [0.0; 2], dorsal: 0.0, dorsal_v: 0.0, detour: None, ring_a: 0.0, escape: 0.0, flipped: -99.0,
+            size: 1.0, role: Role::Route, goal: pos, goal_until: 0.0, rng: 1, cam: pos, cam_fwd: [0.0, 0.0, 1.0], others: vec![], food: None, hist: Default::default(), hist_t: 0.0, escape_dir: [0.0, 0.0, 1.0], food_block: None, chase_at: [0.0; 3], chase_t: 0.0, stuck_events: 0 }
     }
     /// a little free-roaming shark (size 0.33..0.5) starting near p
     pub fn little(path: &FlyPath, field: &Field, start: f64, size: f64, seed: u32) -> Shark {
@@ -166,6 +172,7 @@ impl Shark {
         s
     }
     fn rand(&mut self) -> f64 { let mut x = self.rng; x ^= x << 13; x ^= x >> 17; x ^= x << 5; self.rng = x; x as f64 / 4294967296.0 }
+    pub fn t(&self) -> f64 { self.t }
     pub fn length(&self) -> f64 { LENGTH * self.size }
     /// the little ones: somewhere new in open water every so often, often near one of the sights
     fn roam_target(&mut self, field: &Field) -> V3 {
@@ -233,17 +240,24 @@ impl Shark {
             match found { Some(p) => target = p, None => self.detour = None }
             if self.t > until { self.detour = None; }
         }
-        // stuck against the rock: give up the detour, turn back along the route and rise for a few seconds
-        if self.speed < 0.9 && self.burst <= 0.0 && self.escape <= 0.0 { self.stuck += dt; } else { self.stuck = (self.stuck - dt * 0.5).max(0.0); }
-        if self.stuck > 2.5 {
-            self.stuck = 0.0; self.detour = None; self.escape = 4.0;
-            if self.t > self.flipped + 20.0 { self.dir = -self.dir; self.flipped = self.t; }
-            self.goal_until = 0.0;
+        // Stuck: hardly any progress over the last few seconds, whatever he is trying to do. Stop, look for the
+        // most open way out, turn around into it, and give up on whatever drew him in.
+        self.hist_t += dt;
+        if self.hist_t >= 0.5 { self.hist_t = 0.0; self.hist.push_back(self.pos); if self.hist.len() > 8 { self.hist.pop_front(); } }
+        if self.escape <= 0.0 && self.hist.len() == 8 && len(sub(self.pos, self.hist[0])) < 1.3 * sz.max(0.5) {
+            self.stuck_events += 1; self.hist.clear();
+            self.escape_dir = self.way_out(field);
+            if std::env::var("HAJ_TRACE").is_ok() { eprintln!("STUCK size {:.2} t={:.0} pos=({:.1},{:.1},{:.1}) role {:?} food {} out=({:.2},{:.2},{:.2}) dist {:.2}", self.size, self.t, self.pos[0], self.pos[1], self.pos[2], self.role, self.food.is_some(), self.escape_dir[0], self.escape_dir[1], self.escape_dir[2], field.dist(self.pos[0], self.pos[1], self.pos[2])); }
+            self.escape = 5.0; self.detour = None;
+            if let Some(f) = self.food { self.food_block = Some((f, self.t + 25.0)); }
+            if self.role == Role::Route && self.t > self.flipped + 15.0 { self.dir = -self.dir; self.flipped = self.t; }
+            self.goal = add(self.pos, mul(self.escape_dir, 18.0)); self.goal_until = self.t + 12.0;
         }
         if self.escape > 0.0 {
             self.escape -= dt;
-            let g = field.grad(self.pos[0], self.pos[1], self.pos[2]);
-            target = add(self.pos, add(mul(g, -6.0), [0.0, 3.0, 0.0]));
+            target = add(self.pos, mul(self.escape_dir, 10.0));
+            // turn on the spot first (slowly, so the turn is tight), then swim out
+            self.target_speed = if self.escape > 3.5 { 0.6 } else { 1.6 } * (0.6 + 0.4 * sz);
         }
         let mut want = norm(sub(target, self.pos));
         // obstacle avoidance: feel ahead with the smooth distance field and turn away from the rock; kelp stems
@@ -282,13 +296,15 @@ impl Shark {
         let r = hypot2(self.pos[0], self.pos[2]); if r > 130.0 { push = add(push, mul(norm([-self.pos[0], 0.0, -self.pos[2]]), (r - 130.0) * 0.1)); }
         want = norm(add(want, push));
         if danger > 0.7 { self.speed *= 1.0 - dt * 0.6; }
+        // turning round to get out: go for the way out he picked, and keep moving
+        if self.escape > 0.0 { want = self.escape_dir; danger = 0.0; self.speed = self.speed.max(0.7 * (0.6 + 0.4 * sz)); }
         want[1] = clamp(want[1], -0.5, 0.5); let want = norm(want);
 
         // turn toward it with a limited, smoothed turn rate (yaw about world up, pitch about the side axis)
         let fwd = self.fwd;
         let yaw_err = { let a = fwd[2].atan2(fwd[0]); let b = want[2].atan2(want[0]); let mut d = b - a; while d > PI { d -= TAU; } while d < -PI { d += TAU; } d };
         let pitch_err = want[1].asin() - fwd[1].asin();
-        let max_yaw = 0.55 + 0.5 * danger;
+        let max_yaw = if self.escape > 0.0 { 1.6 } else { 0.55 + 0.5 * danger };
         // a target behind him: commit to one turning direction instead of dithering between the two
         let yaw_err = if yaw_err.abs() > 2.4 && self.yaw_rate.abs() > 0.05 { yaw_err.abs() * self.yaw_rate.signum() } else { yaw_err };
         let yr = clamp(yaw_err * 1.6, -max_yaw, max_yaw); let pr = clamp(pitch_err * 1.4, -0.35, 0.35);
@@ -320,6 +336,20 @@ impl Shark {
             if into > 0.0 { self.speed *= 1.0 - 0.5 * into; }
         }
 
+        // still wedged in (between kelp stems, under a ledge) while turning round: slide out along the way out,
+        // a little at a time, wherever the whole body fits
+        if self.escape > 0.0 && self.escape < 3.5 && self.hist.len() >= 3 && len(sub(self.pos, self.hist[self.hist.len() - 3])) < 0.4 * sz.max(0.5) {
+            let step = mul(self.escape_dir, 0.8 * dt);
+            let save = self.pos; self.pos = add(self.pos, step);
+            if self.body_spheres().iter().any(|(k, r)| field.dist(k[0], k[1], k[2]) + r > 0.02) { self.pos = save; }
+        }
+        // food he cannot reach: give up on that pellet after a while
+        if let Some(f) = self.food {
+            if len(sub(f, self.chase_at)) > 1.0 { self.chase_at = f; self.chase_t = 0.0; }
+            self.chase_t += dt;
+            if self.chase_t > 12.0 { self.food_block = Some((f, self.t + 25.0)); self.chase_t = 0.0; }
+        } else { self.chase_t = 0.0; }
+
         // animation: tail beat follows the speed, fins steer and balance
         let freq = (0.45 + 0.38 * self.speed) / sz.sqrt();
         self.phase += dt * TAU * freq;
@@ -342,6 +372,19 @@ impl Shark {
     pub fn body_spheres(&self) -> [(V3, f64); 7] {
         let z = self.size; let f = self.fwd; let l = norm(cross(self.up, f)); let p = self.pos; let at = |a: f64, s: f64| add(add(p, mul(f, LENGTH * z * a)), mul(l, s * z));
         [(at(0.40, 0.0), 0.28 * z), (at(0.22, 0.0), 0.42 * z), (at(0.0, 0.0), 0.48 * z), (at(-0.2, 0.0), 0.38 * z), (at(-0.4, 0.0), 0.25 * z), (at(0.08, 0.62), 0.16 * z), (at(0.08, -0.62), 0.16 * z)]
+    }
+    /// the most open direction from here: march out along 24 headings (level and a little up or down) and pick the
+    /// one with the longest clear run, preferring to turn round rather than push on the way he was going
+    fn way_out(&self, field: &Field) -> V3 {
+        let clear = 0.6 * self.size + 0.35; let mut best = (-1.0, mul(self.fwd, -1.0));
+        for k in 0..16 { for el in [0.0f64, 0.35, -0.25] {
+            let a = k as f64 / 16.0 * TAU; let d = norm([a.cos() * el.cos(), el.sin(), a.sin() * el.cos()]);
+            let mut run = 0.0;
+            while run < 16.0 { let p = add(self.pos, mul(d, run + 0.75)); if field.dist(p[0], p[1], p[2]) > -clear || p[1] > -2.0 { break; } run += 0.75; }
+            let score = run - 2.0 * dot(d, self.fwd).max(0.0);
+            if score > best.0 { best = (score, d); }
+        } }
+        best.1
     }
     /// where the mouth is (for eating)
     pub fn mouth(&self) -> V3 { add(self.pos, mul(self.fwd, self.length() * 0.42)) }

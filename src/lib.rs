@@ -92,6 +92,7 @@ impl App {
             // food: pellets sink and settle; each shark goes for the nearest one, and eats what reaches its mouth
             for f in &mut self.food {
                 f.2 += s;
+                if self.field.dist_static(f.0[0], f.0[1] - 0.06, f.0[2]) >= -0.06 { f.2 = f.2.max(70.0); } // landed: gone in 20 s
                 if self.field.dist_static(f.0[0], f.0[1] - 0.06, f.0[2]) < -0.06 { f.0[1] -= f.1 * s; f.0[0] += (f.2 * 1.7 + f.1 * 40.0).sin() * 0.05 * s; f.0[2] += (f.2 * 1.3 + f.1 * 70.0).cos() * 0.05 * s; }
             }
             self.food.retain(|f| f.2 < 90.0);
@@ -99,7 +100,9 @@ impl App {
             for sh in std::iter::once(&mut self.shark).chain(self.little.iter_mut()) {
                 let m = sh.mouth(); let reach = 0.6 + 0.5 * sh.size;
                 food.retain(|f| shark::v3::len(shark::v3::sub(f.0, m)) > reach);
+                let blocked = sh.food_block;
                 sh.food = food.iter().map(|f| f.0).filter(|p| shark::v3::len(shark::v3::sub(*p, sh.pos)) < 140.0)
+                    .filter(|p| blocked.is_none_or(|b| sh.t() > b.1 || shark::v3::len(shark::v3::sub(*p, b.0)) > 3.0))
                     .min_by(|a, b| shark::v3::len(shark::v3::sub(*a, sh.pos)).partial_cmp(&shark::v3::len(shark::v3::sub(*b, sh.pos))).unwrap());
             }
             let dc = self.dir.step(s, &self.shark, &self.field);
